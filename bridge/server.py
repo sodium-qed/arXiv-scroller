@@ -96,6 +96,7 @@ class Config:
     max_excerpt: int
     max_tokens: int
     db: Path
+    provider_timeout: int = 180
 
     @classmethod
     def from_env(cls, env):
@@ -129,7 +130,8 @@ class Config:
                    dollars(env.get("ARXIV_AI_DAILY_USD", "1"), "ARXIV_AI_DAILY_USD"), ip, op,
                    whole("ARXIV_AI_MAX_INPUT_CHARS", 100000, 256, 120000),
                    whole("ARXIV_AI_MAX_OUTPUT_TOKENS", 1600, 64, 8192),
-                   Path(env.get("ARXIV_AI_USAGE_DB", DEFAULT_DB)).expanduser())
+                   Path(env.get("ARXIV_AI_USAGE_DB", DEFAULT_DB)).expanduser(),
+                   whole("ARXIV_AI_PROVIDER_TIMEOUT_SECONDS", 180 if provider == "local" else 100, 30, 300))
 
 
 def validate_request(raw, cfg):
@@ -157,15 +159,23 @@ def validate_request(raw, cfg):
             raise BridgeError("Unsupported mathematical knowledge level.")
         knowledge.append({"topic": text_field(item.get("topic"), 100, "knowledge topic", True), "level": item["level"]})
     limits = raw["limits"]
+    profile = raw.get("profile", "full")
+    if profile not in ("quick", "full"):
+        raise BridgeError("Unsupported AI reading profile.")
+    if cfg.provider != "local":
+        profile = "full"
     return {
+        "profile": profile,
         "id": pid + (f"v{version}" if version else ""), "version": version,
         "title": text_field(paper.get("title"), 4000, "title"), "abstract": text_field(paper.get("abstract"), 32000, "abstract"),
         "model": raw["model"], "action": action, "detail": detail, "protected": raw["noSpoilers"],
         "term": text_field(raw.get("term"), 500, "selected term", action == "explain"),
         "question": text_field(raw.get("question"), 2000, "follow-up question"), "knowledge": knowledge,
         "context": text_field(raw.get("context", ""), 1600, "surrounding reading context"),
-        "max_chars": min(cfg.max_excerpt, integer(limits.get("maxInputChars"), 256, 120000, "paper excerpt limit")),
-        "max_tokens": min(cfg.max_tokens, integer(limits.get("maxOutputTokens"), 64, 8192, "output token limit")),
+        "max_chars": min(cfg.max_excerpt, 4000 if profile == "quick" else 120000,
+                         integer(limits.get("maxInputChars"), 256, 120000, "paper excerpt limit")),
+        "max_tokens": min(cfg.max_tokens, 768 if profile == "quick" else 8192,
+                          integer(limits.get("maxOutputTokens"), 64, 8192, "output token limit")),
         "requests": min(cfg.daily_requests, integer(limits.get("dailyRequests"), 0, 10000, "daily request limit")),
         "budget": min(cfg.daily_budget, dollars(limits.get("dailyBudget"), "daily budget")),
         "input_rate": max(cfg.input_price, dollars(limits.get("inputPerMillion"), "input token price")),
@@ -648,6 +658,11 @@ FOLLOWUP = ("followup", "Answer to your follow-up", True)
 
 def answer_fields(req):
     sections = DICTIONARY if req["action"] == "explain" else PROTECTED if req["protected"] else OVERVIEW
+    if req.get("profile") == "quick":
+        keys = ({"definition", "example", "context", "prerequisites"} if req["action"] == "explain"
+                else {"summary", "question", "prerequisites"} if req["protected"]
+                else {"question", "results", "background", "significance"})
+        sections = tuple(field for field in sections if field[0] in keys)
     return sections + (FOLLOWUP,) if req["question"] else sections
 
 
@@ -674,6 +689,14 @@ def prompt_messages(req, source, evidence, fields):
         "If no evidence supports a requested paper claim, leave its text empty and its evidence array empty. "
         "Use only these field keys. Never include external links or Markdown links in generated text."
     )
+    if req.get("profile") == "quick":
+        policy += (
+            " Compact local-model mode: give at most 150 words of explanation across all fields, excluding the evidence quotations. "
+            "Use one or two short sentences per field, one exact quotation per paper-specific field, and no reasoning preamble. "
+            "Preserve every relevant hypothesis, inequality direction, quantifier, exponent, and distinction between a minimum "
+            "and a maximum; never simplify an existential statement into a universal bound. If unsure, omit the claim. "
+            "Do not claim a paper's novelty or importance unless the supplied text supports it."
+        )
     if req["protected"]:
         policy += (
             " Independent-research protection is active. Only give established definitions, general background, prerequisites "
@@ -690,24 +713,85 @@ def prompt_messages(req, source, evidence, fields):
     return [{"role": "system", "content": policy}, {"role": "user", "content": json_bytes(payload).decode()}]
 
 
+def read_provider_stream(response, notify, deadline):
+    """Accumulate OpenAI-compatible SSE without exposing unchecked prose."""
+    pieces = []
+    finish = None
+    usage = None
+    received = 0
+    chunks = 0
+    last_update = 0.0
+    done = False
+    while True:
+        if time.monotonic() > deadline:
+            raise BridgeError("The model exceeded its configured generation time. Try a shorter request.", 504)
+        line = response.readline(390001)
+        if not line:
+            break
+        received += len(line)
+        if received > 390000:
+            raise ValueError("Oversized provider stream")
+        if not line.startswith(b"data:"):
+            continue
+        value = line[5:].strip()
+        if value == b"[DONE]":
+            done = True
+            break
+        data = json.loads(value)
+        if not isinstance(data, dict) or data.get("error"):
+            raise ValueError("Provider stream error")
+        choices = data.get("choices", [])
+        if not isinstance(choices, list):
+            raise ValueError("Invalid provider choices")
+        if isinstance(data.get("usage"), dict):
+            usage = data["usage"]
+        for choice in choices:
+            if not isinstance(choice, dict) or choice.get("index", 0) != 0:
+                continue
+            delta = choice.get("delta", {})
+            if not isinstance(delta, dict) or delta.get("refusal"):
+                raise ValueError("Provider refused or returned malformed delta")
+            content = delta.get("content")
+            if isinstance(content, str) and content:
+                pieces.append(content)
+                chunks += 1
+                now = time.monotonic()
+                if now - last_update >= 1.0:
+                    notify("generating", chunks)
+                    last_update = now
+            if choice.get("finish_reason") is not None:
+                finish = choice["finish_reason"]
+    if not done or finish is None or not pieces:
+        raise ValueError("Incomplete provider stream")
+    result = {"choices": [{"finish_reason": finish, "message": {"content": "".join(pieces)}}]}
+    if usage is not None:
+        result["usage"] = usage
+    return result
+
+
 def provider_request(cfg, req, messages):
     # No user-controlled URLs, redirects, tools, web search, proxy settings, or remote images.
-    payload = {"model": req["model"], "messages": messages, "stream": False, "response_format": {"type": "json_object"}}
+    notify = req.get("_progress")
+    streaming = cfg.provider == "local" and callable(notify)
+    payload = {"model": req["model"], "messages": messages, "stream": streaming, "response_format": {"type": "json_object"}}
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if cfg.provider == "openai":
-        connection = client.HTTPSConnection("api.openai.com", timeout=100)
+        connection = client.HTTPSConnection("api.openai.com", timeout=cfg.provider_timeout)
         payload["max_completion_tokens"] = req["max_tokens"]
         payload["store"] = False
         headers["Authorization"] = "Bearer " + cfg.api_key
     else:
-        connection = client.HTTPConnection("127.0.0.1", cfg.local_port, timeout=100)
+        connection = client.HTTPConnection("127.0.0.1", cfg.local_port, timeout=cfg.provider_timeout)
         payload["max_tokens"] = req["max_tokens"]
     try:
+        deadline = time.monotonic() + cfg.provider_timeout
         with closing(connection) as conn:
             conn.request("POST", "/v1/chat/completions", body=json_bytes(payload), headers=headers)
             response = conn.getresponse()
             if response.status != 200:
                 raise BridgeError(f"The configured provider returned HTTP {response.status}. Check its model, credentials, limits, and JSON-mode support.", 502)
+            if streaming and "text/event-stream" in (response.getheader("Content-Type", "").lower()):
+                return read_provider_stream(response, notify, deadline)
             raw = response.read(390001)
             if len(raw) > 390000:
                 raise ValueError
@@ -790,8 +874,10 @@ class Application:
         self.provider = provider
         self.ledger = Ledger(cfg.db)
 
-    def handle(self, raw):
+    def handle(self, raw, progress=None):
         req = validate_request(raw, self.cfg)
+        if callable(progress):
+            req["_progress"] = progress
         if req["protected"] and PROOF_REQUEST.search(req["question"]):
             raise BridgeError("Independent-research mode protects that proof or solution. Change the paper's protection setting to request it explicitly.", 422)
         if not req["requests"] or (self.cfg.provider == "openai" and not req["budget"]):
@@ -801,7 +887,22 @@ class Application:
             row = db.execute("SELECT requests,cost FROM daily WHERE day=?", (day_now,)).fetchone()
             if row and row[0] >= req["requests"]:
                 raise BridgeError("The UTC daily provider request limit has been reached.", 429)
-        source, note, evidence = prepare_evidence(req, self.sources.get(req))
+        if progress:
+            progress("retrieving", 0)
+        # A quick unprotected overview uses the exact listing abstract directly.
+        # Protected requests retain the established protection/source selection path.
+        if (req.get("profile") == "quick" and req["action"] == "overview"
+                and not req["question"] and not req["protected"] and req["abstract"]):
+            acquired = Source("abstract", "https://arxiv.org/abs/" + req["id"],
+                              "Quick overview: the supplied arXiv abstract was analyzed; the full paper was not retrieved.",
+                              (Passage("Original abstract", "", req["abstract"]),))
+        else:
+            acquired = self.sources.get(req)
+        source, note, evidence = prepare_evidence(req, acquired)
+        if req.get("profile") == "quick":
+            note += " Compact local-model profile (short explanation and bounded excerpts)."
+        if progress:
+            progress("generating", 0)
         fields = answer_fields(req)
         messages = prompt_messages(req, source, evidence, fields)
         # Conservative UTF-8 byte bound plus chat-format overhead. Actual billed usage settles it.
@@ -825,6 +926,8 @@ class Application:
             report.update(inputTokens=counts[0], outputTokens=counts[1])
         else:
             note += " Token usage was unavailable, so the maximum estimated charge remains reserved."
+        if progress:
+            progress("validating", 0)
         try:
             answer, citations = checked_answer(response, fields, evidence, source, req)
         except BridgeError as exc:
@@ -880,12 +983,49 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeError, RecursionError):
             raise BridgeError("Invalid request JSON.") from None
 
+    def stream_answer(self, raw):
+        # Only emit status metadata until checked_answer has completed. No
+        # speculative model text, excerpts, or credentials reach the UI.
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        connected = True
+
+        def emit(obj):
+            nonlocal connected
+            if connected:
+                try:
+                    self.wfile.write(json_bytes(obj) + b"\n")
+                    self.wfile.flush()
+                except (OSError, ValueError):
+                    connected = False
+
+        def progress(phase, chunks):
+            emit({"type": "progress", "phase": phase, "chunks": chunks})
+
+        try:
+            result = self.server.application.handle(raw, progress)
+            emit({"type": "result", "status": 200, "data": result})
+        except BridgeError as exc:
+            emit({"type": "result", "status": exc.status, "data": {"error": str(exc)}})
+        except Exception:
+            emit({"type": "result", "status": 500,
+                  "data": {"error": "The bridge could not complete the request. Check its local configuration."}})
+        finally:
+            self.close_connection = True
+
     def do_POST(self):
         try:
             raw = self.read_request()
             if not self.server.gate.acquire(blocking=False):
                 raise BridgeError("The bridge is busy. Try again after the current generation finishes.", 429)
             try:
+                if isinstance(raw, dict) and raw.get("progress") is True and self.server.application.cfg.provider == "local":
+                    self.stream_answer(raw)
+                    return
                 result = self.server.application.handle(raw)
             finally:
                 self.server.gate.release()

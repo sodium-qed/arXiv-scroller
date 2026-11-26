@@ -29,4 +29,10 @@
 
 The supplied listing and controlled model responses give reproducible parser, recommendation and AI checks. Browser tests using a fixture and a Tampermonkey-API adapter exercise a different boundary from a signed Tampermonkey installation, a live arXiv response or a billed hosted completion. The test guide identifies these boundaries and provides an installed-copy check. [Verification details](TESTING.md)
 
+In a separate headless Chromium 152 check, the renderer produced native MathML for 3,540 of the 3,674 delimited expressions individually identified in the supplied fixture's parsed titles and abstracts. The other 134 retained their original TeX, including author macros such as `\Fp`. A layout check verified the numerator appeared above the denominator in a fraction and found both rows in a rendered matrix. These counts describe this particular fixture and renderer version.
+
+
+## Compact local AI mode
+
+Quick overviews use abstract-only evidence when unprotected. This trades depth for speed; switch to Detailed for paper excerpts. Streaming reports progress, not unchecked mathematical text. Source quotations can verify wording but cannot detect every misinterpretation of a correct quotation. The local model still needs independent accuracy and latency benchmarking. No hardware changes are required by the software.
 In a headless Chromium 152 exercise of the bundled renderer, the source titles and abstracts supplied 3,674 delimited TeX samples. The renderer converted 3,540 to native MathML and preserved the other 134 as TeX, including author macros such as `\Fp`. A layout check verified the numerator appeared above the denominator in a fraction and found both rows in a rendered matrix. This exercise measures the renderer used for generated answers. When reading the announcement, arXiv typesets its original content.

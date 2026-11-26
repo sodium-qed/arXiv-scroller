@@ -145,3 +145,14 @@ python -m unittest discover -s tests -p test_bridge.py -v
 ~~~
 
 Validated against the official [OpenAI Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create), [Ollama OpenAI compatibility](https://docs.ollama.com/api/openai-compatibility), [pypdf extraction documentation](https://pypdf.readthedocs.io/en/stable/user/extract-text.html), [arXiv web crawler rules](https://arxiv.org/robots.txt) and [arXiv access guidance](https://info.arxiv.org/help/api/tou.html) on 2026-11-26. Network availability, access permissions and mathematical answer quality depend on the chosen live services.
+
+
+## Local reading profiles and response progress
+
+The Local reading profile defaults to **Quick** in new and existing browser settings. For ordinary unprotected overviews this uses the original listing abstract without downloading the paper. The source label explicitly identifies abstract-only analysis. Quick limits source excerpts to 4,000 characters, generated output to 768 tokens (including JSON and quotations), and uses a shorter set of answer fields. Existing configured limits may be lower. Protected readings retain the background filter; term explanations still retrieve relevant paper excerpts. Select **Detailed** or use **Detailed paper overview** for the original HTML/PDF-first behavior. Rigorous explanations and follow-ups use Detailed by default. Hosted OpenAI retains the full profile.
+
+The bridge still requires exact source quotations for paper-specific claims. The local prompt now emphasizes preserving quantifiers, hypotheses, inequalities, exponents, and minimum/maximum distinctions. These instructions and quotation matching do not certify the model's interpretation.
+
+Local requests may stream OpenAI-compatible provider events. The browser receives only progress metadata until the complete structured answer passes existing source validation; it never displays or caches unchecked partial prose. If the provider returns a complete JSON response instead, the bridge accepts that response normally. No automatic retry is made. An older bridge may ignore the new request fields; update both components to obtain the new behavior.
+
+The bridge accepts `ARXIV_AI_PROVIDER_TIMEOUT_SECONDS` (30–300 seconds; default 180 for local and 100 for hosted). This sets the provider socket timeout and the local stream deadline. The browser request timeout is independently configurable in AI Settings (60–600 seconds, default 420); allow time for source retrieval as well as generation. Browser/transport buffering may delay live progress notifications. Actual speed and model compatibility must be tested on the reader's computer.

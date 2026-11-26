@@ -127,3 +127,33 @@ test('no generation when allowance is zero, consent is revoked, or inputs exceed
   await assert.rejects(ctx.client.overview(paper), /authorize/);
   assert.equal(ctx.calls.length, 1);
 });
+
+test('quick local profile caps limits and separates detailed cache entries; hosted stays full', async () => {
+  const ctx = setup({ ai: { maxInputChars: 18000, maxOutputTokens: 1600, timeoutSeconds: 300 } });
+  await ctx.client.overview(paper);
+  assert.equal(ctx.calls[0].payload.profile, 'quick');
+  assert.equal(ctx.calls[0].payload.limits.maxInputChars, 4000);
+  assert.equal(ctx.calls[0].payload.limits.maxOutputTokens, 768);
+  assert.equal(ctx.calls[0].init.timeout, 300000);
+  await ctx.client.overview(paper, { profile: 'full' });
+  assert.equal(ctx.calls.length, 2);
+  assert.equal(ctx.calls[1].payload.limits.maxInputChars, 18000);
+  const hosted = setup({ ai: { provider: 'openai', profile: 'quick' } });
+  await hosted.client.overview(paper);
+  assert.equal(hosted.calls[0].payload.profile, 'full');
+  assert.equal(hosted.calls[0].payload.progress, false);
+});
+
+test('progress events never enter cached prose and only the terminal result is accepted', async () => {
+  let ctx;
+  const seen = [];
+  ctx = setup({ respond: (payload, url) => ({ status: 200, finalUrl: url, text:
+    JSON.stringify({type:'progress',phase:'generating',chunks:3})+'\n'+
+    JSON.stringify({type:'result',status:200,data:ctx.resultFor(payload)})+'\n' }) });
+  const result = await ctx.client.overview(paper,{onProgress:(...p)=>seen.push(p)});
+  assert.deepEqual(seen,[['generating',3]]);
+  assert.equal(result.text,'The research question [S1].');
+  const truncated=setup({respond:()=>({status:200,text:'{"type":"progress","phase":"generating","chunks":2}\n'})});
+  await assert.rejects(truncated.client.overview(paper),/incomplete/);
+  assert.equal(truncated.cache.size,0);
+});

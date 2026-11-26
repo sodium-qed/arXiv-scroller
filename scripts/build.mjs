@@ -56,7 +56,6 @@ const metadata = `// ==UserScript==
 // @grant        GM_addValueChangeListener
 // @grant        GM_registerMenuCommand
 // @grant        GM_xmlhttpRequest
-// @connect      arxiv.org
 // @connect      127.0.0.1
 // ==/UserScript==`;
 const bundle = `${metadata}\n\n(() => {\n'use strict';\nconst __factories = {\n${[...modules].map(([name,code])=>`${JSON.stringify(name)}: (__require) => {\n${code}\n}`).join(',\n')}\n};\nconst __cache = Object.create(null);\nfunction __require(name) { return __cache[name] || (__cache[name] = __factories[name](__require)); }\n__require(${JSON.stringify(entry)});\n})();\n`;

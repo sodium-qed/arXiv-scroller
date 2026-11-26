@@ -77,7 +77,7 @@ GM_MOCK = r"""
         const paper = body.paper;
         const version = paper.version ? 'v' + paper.version : '';
         reply(200, JSON.stringify({
-          text: "Prerequisite definitions are fixture text. Literal <em>notation</em> stays text.",
+          text: "Prerequisite definitions are fixture text. Literal <em>notation</em> stays text. A square is $x^2$.",
           source: {kind: 'abstract', url: 'https://arxiv.org/abs/' + paper.id + version,
                    note: 'Offline fixture response using only its abstract.'},
           usage: {inputTokens: 10, outputTokens: 12, estimatedCostUsd: 0}
@@ -107,14 +107,38 @@ CAPTURE_NATIVE = """
 () => {
   const original = document.documentElement.outerHTML;
   const nodes = [...document.querySelectorAll('*')].map(node => [node, node.parentNode]);
-  window.fixtureNativeUnchanged = () => {
+  const rows = 'dl[id="articles"] > dt, dl[id="articles"] > dd';
+  const attrs = [...document.querySelectorAll(rows)].map(node => node.getAttribute('hidden'));
+  const typography = () => [...document.querySelectorAll('#dlpage h1, #dlpage dt a[title="Abstract"], #dlpage .list-title')]
+    .slice(0, 12).map(node => {
+      const style = getComputedStyle(node);
+      return [style.fontFamily, style.fontSize, style.color, style.backgroundColor].join('|');
+    }).join(';');
+  const originalStyle = typography();
+  window.fixtureNativeUnchanged = (ignoreFilter = false) => {
     const clone = document.documentElement.cloneNode(true);
     for (const addition of clone.querySelectorAll('[data-arxiv-discovery]')) addition.remove();
-    return clone.outerHTML === original && nodes.every(([node,parent]) =>
-      node.isConnected && node.parentNode === parent);
+    if (ignoreFilter) {
+      // Only mask a temporary change to the hidden attribute on existing paper
+      // pairs. Everything else must still match the original markup.
+      [...clone.querySelectorAll(rows)].forEach((node, i) => {
+        if (attrs[i] === null) node.removeAttribute('hidden');
+        else node.setAttribute('hidden', attrs[i]);
+      });
+    }
+    return clone.outerHTML === original && typography() === originalStyle &&
+      nodes.every(([node,parent]) => node.isConnected && node.parentNode === parent);
   };
 }
 """
+
+COMMANDS = {
+    "Show": "Show arXiv Discovery", "Daily": "Daily selection", "All": "Show all papers",
+    "Previous": "Previous daily selections", "Category": "Explore a category",
+    "Bookmarks": "Bookmarks and reading", "Authors": "Followed researchers",
+    "Interests": "Interests and training history", "Knowledge": "Knowledge and glossary",
+    "Settings": "Discovery settings", "Original": "Original arXiv",
+}
 
 
 def row(number, category, *, first=False):
@@ -155,10 +179,10 @@ def reference_fixture():
         return source.read()
 
 
-def fixtures_only(document):
+def fixtures_only(document, url=BASE):
     """All requests are intercepted. arXiv's own fixture scripts never run."""
     def handler(route):
-        if route.request.is_navigation_request() and route.request.url == BASE:
+        if route.request.is_navigation_request() and route.request.url == url:
             route.fulfill(status=200, content_type="text/html; charset=utf-8", body=document,
                           headers={"Content-Security-Policy":
                                    "default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
@@ -209,16 +233,16 @@ class UserscriptBrowserTests(unittest.TestCase):
         self.page.goto(BASE, wait_until="networkidle")
         self.mount()
 
-    def mount(self, *, toolbar=True):
+    def mount(self, *, additions=True):
         self.page.evaluate(CAPTURE_NATIVE)
         self.page.evaluate(self.bundle)
-        if toolbar:
-            self.page.locator("#arxiv-discovery-toolbar").wait_for(state="attached")
         self.page.wait_for_function("() => fixtureGM.menu.has('Show arXiv Discovery')")
+        if additions:
+            self.page.locator("#arxiv-discovery-dialogs").wait_for(state="attached")
 
-    def reload_and_mount(self, *, toolbar=True):
+    def reload_and_mount(self, *, additions=True):
         self.page.reload(wait_until="networkidle")
-        self.mount(toolbar=toolbar)
+        self.mount(additions=additions)
 
     def close_dialog(self):
         dialog = self.page.locator("dialog[open]")
@@ -226,29 +250,89 @@ class UserscriptBrowserTests(unittest.TestCase):
             dialog.get_by_role("button", name=re.compile("^Close")).click()
             expect(dialog).to_have_count(0)
 
-    def nav(self, button):
+    def menu(self, action):
+        # This callback is the boundary provided by a real Tampermonkey menu.
+        self.page.evaluate("(name) => fixtureGM.menu.get(name)()", COMMANDS[action])
+
+    def nav(self, section):
         self.close_dialog()
-        self.page.get_by_role("navigation", name="arXiv Discovery").get_by_role(
-            "button", name=button, exact=True).click()
-        return self.page.get_by_role("dialog")
+        self.menu(section)
+        panel = self.page.get_by_role("dialog")
+        expect(panel).to_be_visible()
+        return panel
+
+    @property
+    def controls(self):
+        return self.page.locator("#ad-listing-controls")
+
+    @property
+    def settings_button(self):
+        return self.page.get_by_role("button", name="Discovery settings", exact=True)
+
+    def open_page_settings(self):
+        self.settings_button.click()
+        panel = self.page.get_by_role("dialog", name="Discovery settings", exact=True)
+        expect(panel).to_be_visible()
+        return panel
+
+    @property
+    def native_rows(self):
+        return self.page.locator('dl[id="articles"] > dd')
+
+    @property
+    def visible_rows(self):
+        return self.page.locator('dl[id="articles"] > dd:visible')
+
+    def paper_ids(self):
+        return self.visible_rows.evaluate_all("""rows => rows.map(dd => {
+          const a = dd.previousElementSibling.querySelector('a[title="Abstract"]');
+          return new URL(a.href).pathname.slice(5).replace(/v[0-9]+$/, '');
+        })""")
+
+    def options(self):
+        control = self.controls.get_by_text("Selection options", exact=True)
+        if control.is_visible() and not control.evaluate("s => s.parentElement.open"):
+            control.click()
+        return self.controls
 
     def daily(self):
-        panel = self.nav("Daily selection")
-        expect(panel.get_by_text("End of this daily selection.", exact=True)).to_be_visible()
-        return panel
+        self.close_dialog()
+        self.menu("Daily")
+        expect(self.controls).to_contain_text("papers reviewed")
+        expect(self.page.locator("dialog[open]")).to_have_count(0)
+        return self.controls
 
-    @staticmethod
-    def paper_ids(panel):
-        return panel.locator("article.card").evaluate_all("(cards) => cards.map(c => c.dataset.paperId)")
+    def await_mode(self, mode):
+        self.page.wait_for_function("""mode => {
+          const records = GM_listValues().filter(k=>k.includes(':selections:')).map(k=>GM_getValue(k));
+          const visible = [...document.querySelectorAll('dl[id="articles"] > dt')]
+            .filter(dt => [dt,dt.nextElementSibling].every(node =>
+              !node.closest('[hidden]') && node.checkVisibility({visibilityProperty:true})))
+            .map(dt => new URL(dt.querySelector('a[title="Abstract"]').href).pathname.slice(5).replace(/v[0-9]+$/, ''));
+          return records.some(r => r?.current?.mode === mode &&
+              r.current.entries.length === visible.length && r.current.entries.every(e=>visible.includes(e.paperId)));
+        }""", arg=mode)
+
+    def pick_mode(self, panel, mode):
+        # The userscript accepts trusted changes. Commit a native keyboard
+        # choice, since Playwright's select_option() dispatches a synthetic event.
+        picker = panel.get_by_label("Recommendation mode")
+        index = picker.locator(f'option[value="{mode}"]').evaluate("option => option.index")
+        picker.press("Alt+ArrowDown")
+        self.page.keyboard.press("Home")
+        for _ in range(index):
+            self.page.keyboard.press("ArrowDown")
+        self.page.keyboard.press("Enter")
+        expect(picker).to_have_value(mode)
+        expect(picker).not_to_have_attribute("aria-busy", "true")
+        expect(picker).to_be_focused()
 
     def change_mode(self, mode):
-        panel = self.page.get_by_role("dialog")
-        old = panel.element_handle()
-        panel.get_by_label("Recommendation mode").select_option(mode)
-        self.page.wait_for_function("(dialog) => !dialog.isConnected", arg=old)
-        expect(panel.get_by_label("Recommendation mode")).to_have_value(mode)
-        expect(panel.get_by_text("End of this daily selection.", exact=True)).to_be_visible()
-        return panel
+        panel = self.open_page_settings()
+        self.pick_mode(panel, mode)
+        self.await_mode(mode)
+        expect(panel).to_be_visible()
+        self.close_dialog()
 
     def backup(self):
         panel = self.nav("Settings")
@@ -287,141 +371,257 @@ class UserscriptBrowserTests(unittest.TestCase):
 
     def test_closed_shadow_boot(self):
         self.prepare(open_shadows=False)
-        self.assertTrue(self.page.locator("#arxiv-discovery-toolbar").evaluate(
-            "(host) => host.shadowRoot === null"))
+        for host in (self.page.locator("#arxiv-discovery-dialogs"), self.native_rows.first.locator("[data-arxiv-discovery]")):
+            self.assertTrue(host.evaluate("(host) => host.shadowRoot === null"))
         self.assertTrue(self.page.evaluate("fixtureNativeUnchanged()"))
         self.assertEqual(self.page.evaluate("fixtureGM.requests.length"), 0)
 
     def test_closed_shadow_text_input_does_not_submit_keyboard_feedback(self):
-        # Retain a test-only reference for measuring coordinates. The boundary
-        # stays closed and Chromium retargets keydown to the host in production.
+        # Keep the native boundary closed so document keydown sees the host.
         self.context.add_init_script("""(() => {
           const original = Element.prototype.attachShadow;
           Element.prototype.attachShadow = function(options) {
             const root = original.call(this, options);
-            if (this.id === 'arxiv-discovery-toolbar') window.fixtureClosedToolbar = root;
+            if (this.id === 'arxiv-discovery-dialogs') window.fixtureClosedDialog = root;
             return root;
           };
         })();""")
         self.prepare(open_shadows=False)
-
-        def click_closed(selector, caption=None):
-            point = self.page.evaluate("""([selector, caption]) => {
-              const item = [...fixtureClosedToolbar.querySelectorAll(selector)].find(
-                node => !caption || node.textContent === caption);
-              item.scrollIntoView({block:'center'});
-              const bounds = item.getBoundingClientRect();
-              return {x:bounds.left + bounds.width/2, y:bounds.top + bounds.height/2};
-            }""", [selector, caption])
-            self.page.mouse.click(**point)
-
-        click_closed("nav button", "Knowledge")
-        click_closed("dialog input[placeholder]")
-        self.assertEqual(self.page.evaluate("fixtureClosedToolbar.activeElement.tagName"), "INPUT")
+        self.menu("Knowledge")
+        point = self.page.evaluate("""() => {
+          const field=fixtureClosedDialog.querySelector('dialog input[placeholder]');
+          field.scrollIntoView({block:'center'});
+          const r=field.getBoundingClientRect(); return {x:r.left+r.width/2, y:r.top+r.height/2};
+        }""")
+        self.page.mouse.click(**point)
+        self.assertEqual(self.page.evaluate("fixtureClosedDialog.activeElement.tagName"), "INPUT")
         self.page.keyboard.press("Alt+l")
         self.page.keyboard.type("finite sequences")
         self.page.keyboard.press("Tab")
         self.page.keyboard.press("Escape")
         self.assertEqual(self.page.evaluate("GM_listValues().filter(k => k.includes(':events:'))"), [])
 
-    def test_full_reference_preserved_daily_feed_original_and_menu_restore(self):
+    def test_full_reference_inline_actions_native_filter_and_menu_restoration(self):
         self.prepare(reference_fixture())
-        expect(self.page.get_by_role("navigation", name="arXiv Discovery")).to_contain_text("701 papers")
+        expect(self.native_rows).to_have_count(701)
+        expect(self.visible_rows).to_have_count(701)
+        expect(self.native_rows.get_by_role("group", name="Paper tools", exact=True)).to_have_count(701)
+        expect(self.page.locator("#ad-listing-controls, article.card, dialog[open]")).to_have_count(0)
+        expect(self.settings_button).to_be_visible()
+        for row in (self.native_rows.first, self.native_rows.last):
+            row.scroll_into_view_if_needed()
+            for name in ("Like", "Dislike", "Bookmark", "Mark as read", "AI overview"):
+                expect(row.get_by_role("button", name=name, exact=True)).to_be_visible()
+        self.assertTrue(self.page.evaluate("fixtureNativeUnchanged()"))
+        self.assertTrue(self.page.evaluate("""() => [...document.querySelectorAll('dl[id="articles"] > dd')]
+          .every(dd => dd.lastElementChild?.hasAttribute('data-arxiv-discovery'))"""))
         counts = self.page.evaluate("""() => {
           const papers = GM_listValues().filter(k => k.includes(':papers:')).map(k => GM_getValue(k));
-          return {sections: Object.fromEntries(['new','cross','replacement'].map(
-                    section => [section,papers.filter(p => p.section === section).length])),
-                  dates: [...new Set(papers.map(p => p.announcementDate))]};
+          return {sections:Object.fromEntries(['new','cross','replacement'].map(
+            s => [s,papers.filter(p => p.section === s).length])), dates:[...new Set(papers.map(p=>p.announcementDate))]};
         }""")
         self.assertEqual(counts, {"sections": {"new": 379, "cross": 61, "replacement": 261}, "dates": [DATE]})
-        panel = self.daily()
-        first = self.paper_ids(panel)
-        self.assertGreater(len(first), 0)
-        self.assertLessEqual(len(first), 32)
-        self.assertEqual(len(set(first)), len(first))
-        expect(panel.get_by_label("Recommendation mode")).to_have_value("random")
-        expect(panel).to_contain_text(f"0 / {len(first)} papers reviewed")
+        original = self.paper_ids()
+        first = self.native_rows.first
+        first.get_by_text("More tools", exact=True).click()
+        first.get_by_role("button", name="Daily selection", exact=True).click()
+        self.await_mode("random")
+        selected = self.paper_ids()
+        self.assertEqual(len(selected), 30)
+        self.assertEqual(len(selected), len(set(selected)))
+        self.assertEqual(selected, [pid for pid in original if pid in selected])
+        self.assertEqual(self.visible_rows.count(), self.page.locator('dl[id="articles"] > dt:visible').count())
+        expect(self.controls).to_contain_text("0 / 30")
+        expect(self.page.locator("dialog[open], article.card")).to_have_count(0)
+        self.assertTrue(self.page.evaluate("fixtureNativeUnchanged(true)"))
+        self.controls.get_by_role("button", name="Show all papers", exact=True).click()
+        expect(self.visible_rows).to_have_count(701)
         self.assertTrue(self.page.evaluate("fixtureNativeUnchanged()"))
+        self.menu("Original")
+        expect(self.page.locator("[data-arxiv-discovery]")).to_have_count(0)
+        expect(self.settings_button).to_have_count(0)
+        self.assertTrue(self.page.evaluate("fixtureNativeUnchanged()"))
+        self.reload_and_mount(additions=False)
+        expect(self.page.locator("[data-arxiv-discovery]")).to_have_count(0)
+        self.menu("All")
+        expect(self.settings_button).to_have_count(0)
+        self.nav("Bookmarks")
         self.close_dialog()
-        self.page.get_by_role("button", name="Original arXiv", exact=True).click()
+        expect(self.settings_button).to_have_count(0)
+        expect(self.native_rows.locator("[data-arxiv-discovery]")).to_have_count(0)
+        self.menu("Show")
+        expect(self.settings_button).to_be_visible()
+        self.daily()
+        self.await_mode("random")
+        self.assertEqual(self.paper_ids(), selected)
+        self.assertEqual(self.page.evaluate("fixtureGM.requests.length"), 0)
+
+    def test_original_row_attributes_survive_empty_selection_and_hide(self):
+        hidden_row = ROWS[0].replace("<dt>", '<dt hidden="until-found" data-original="before">').replace(
+            "<dd>", '<dd hidden="" style="margin-left: 3em">')
+        self.prepare(listing([hidden_row, *ROWS[1:]]))
+        self.daily()
+        self.change_mode("subscriptions")
+        expect(self.visible_rows).to_have_count(0)
+        self.assertTrue(self.page.evaluate("fixtureNativeUnchanged(true)"))
+        self.menu("All")
+        self.assertTrue(self.page.evaluate("fixtureNativeUnchanged()"))
+        self.daily()
+        self.menu("Original")
         expect(self.page.locator("[data-arxiv-discovery]")).to_have_count(0)
         self.assertTrue(self.page.evaluate("fixtureNativeUnchanged()"))
-        self.reload_and_mount(toolbar=False)
-        expect(self.page.locator("[data-arxiv-discovery]")).to_have_count(0)
-        # Simulate choosing Tampermonkey's registered menu command.
-        self.page.evaluate("() => fixtureGM.menu.get('Show arXiv Discovery')()")
-        self.assertEqual(self.paper_ids(self.daily()), first)
-        self.assertEqual(self.page.evaluate("fixtureGM.requests.length"), 0)
+        self.assertEqual(self.page.locator('dl[id="articles"] > dt').first.get_attribute("hidden"), "until-found")
+        self.assertEqual(self.native_rows.first.get_attribute("hidden"), "")
+
+    def test_settings_disables_native_filter_actions_and_shortcuts_until_reenabled(self):
+        self.prepare()
+        original = self.paper_ids()
+        self.daily()
+        expect(self.visible_rows).to_have_count(3)
+        panel = self.open_page_settings()
+        toggle = panel.get_by_label("Enable paper tools")
+        toggle.focus()
+        self.page.keyboard.press("Space")
+        expect(toggle).not_to_be_checked()
+        expect(toggle).not_to_have_attribute("aria-busy", "true")
+        expect(toggle).to_be_focused()
+        expect(panel.get_by_role("button", name="Show daily selection")).to_be_disabled()
+        self.close_dialog()
+
+        expect(self.settings_button).to_be_visible()
+        expect(self.controls).to_have_count(0)
+        expect(self.native_rows.locator("[data-arxiv-discovery]")).to_have_count(0)
+        self.assertEqual(self.paper_ids(), original)
+        self.page.locator('dl[id="articles"] > dt a[title="Abstract"]').first.focus()
+        self.page.keyboard.press("Alt+l")
+        self.select_word(self.native_rows.first.locator(".fixture-word"), "Compactness")
+        expect(self.page.get_by_role("button", name="Explain selection")).to_have_count(0)
+        self.assertEqual(self.page.evaluate("GM_listValues().filter(k => k.includes(':events:'))"), [])
+        self.assertTrue(self.page.evaluate("fixtureNativeUnchanged()"))
+
+        self.nav("Bookmarks")
+        self.close_dialog()
+        panel = self.open_page_settings()
+        expect(panel.get_by_label("Enable paper tools")).not_to_be_checked()
+        self.pick_mode(panel, "subscriptions")
+        self.close_dialog()
+        expect(self.native_rows.locator("[data-arxiv-discovery]")).to_have_count(0)
+        self.reload_and_mount()
+        expect(self.native_rows.locator("[data-arxiv-discovery]")).to_have_count(0)
+        panel = self.open_page_settings()
+        toggle = panel.get_by_label("Enable paper tools")
+        expect(toggle).not_to_be_checked()
+        expect(panel.get_by_label("Recommendation mode")).to_have_value("subscriptions")
+        toggle.check()
+        self.close_dialog()
+
+        expect(self.native_rows.get_by_role("button", name="Bookmark", exact=True)).to_have_count(len(ROWS))
+        self.assertEqual(self.paper_ids(), original)
+        self.assertTrue(self.page.evaluate("fixtureNativeUnchanged()"))
+        self.open_page_settings().get_by_role("button", name="Show daily selection", exact=True).click()
+        self.await_mode("subscriptions")
+        expect(self.visible_rows).to_have_count(0)
 
     def test_modes_replacement_restore_and_history_survive_refresh(self):
         self.prepare()
-        panel = self.daily()
-        first = self.paper_ids(panel)
-        self.assertEqual(len(set(first)), 3)
-        self.assertTrue(panel.get_by_text("29 categories not represented", exact=True).count())
-        panel.locator("article.card").first.get_by_role("button", name="Replace this paper").click()
-        expect(panel.locator("article.card").first).not_to_have_attribute("data-paper-id", first[0])
-        replaced = self.paper_ids(panel)
-        self.assertEqual(len(set(replaced)), 3)
-        self.assertEqual(replaced[1:], first[1:])
-        panel.get_by_role("button", name="Restore original selection").click()
-        expect(panel.locator("article.card").first).to_have_attribute("data-paper-id", first[0])
-        self.assertEqual(self.paper_ids(panel), first)
-        for mode in ("balanced", "personalized", "discovery", "subscriptions"):
-            panel = self.change_mode(mode)
-            self.assertEqual(len(self.paper_ids(panel)), len(set(self.paper_ids(panel))))
-        expect(panel).to_contain_text("No eligible papers match")
-        self.assertEqual(self.paper_ids(self.change_mode("random")), first)
+        self.daily()
+        initial = self.paper_ids()
+        self.assertEqual(len(set(initial)), 3)
+        self.assertEqual(self.visible_rows.count(), 3)
+        self.visible_rows.first.locator(".selection-note").get_by_role(
+            "button", name="Replace this paper", exact=True).click()
+        self.page.wait_for_function("""id => ![...document.querySelectorAll('dl[id="articles"] > dt')]
+          .some(dt => dt.getClientRects().length &&
+            dt.querySelector('a[title="Abstract"]').href.split('/').pop().replace(/v[0-9]+$/,'') === id)""", arg=initial[0])
+        replacement = self.paper_ids()
+        self.assertEqual(len(set(replacement)), 3)
+        self.assertEqual(len(set(initial) ^ set(replacement)), 2)
+        self.options().get_by_role("button", name="Restore original selection").click()
+        self.page.wait_for_function("""expected => {
+          const visible = [...document.querySelectorAll('dl[id="articles"] > dt:not([hidden])')]
+            .map(dt=>dt.querySelector('a[title="Abstract"]').href.split('/').pop().replace(/v[0-9]+$/,''));
+          return JSON.stringify(visible)===JSON.stringify(expected);
+        }""", arg=initial)
+        self.assertEqual(self.paper_ids(), initial)
+        # Consecutive arrows operate on the replacement selector after a daily
+        # redraw. Closing the options or dropping focus would lose the next key.
+        picker = self.options().get_by_label("Recommendation mode")
+        picker.focus()
+        for mode in ("balanced", "personalized"):
+            self.page.keyboard.press("ArrowDown")
+            self.await_mode(mode)
+            expect(picker).to_have_value(mode)
+            expect(picker).to_be_visible()
+            expect(picker).to_be_focused()
+        for mode in ("discovery", "subscriptions"):
+            self.change_mode(mode)
+            ids = self.paper_ids()
+            self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(self.paper_ids(), [])
+        self.change_mode("random")
+        self.assertEqual(self.paper_ids(), initial)
         self.reload_and_mount()
-        self.assertEqual(self.paper_ids(self.daily()), first)
-        panel.get_by_role("button", name="Regenerate daily selection").click()
-        panel.get_by_role("button", name="Previous selections").click()
-        expect(self.page.get_by_role("dialog")).to_contain_text("saved revisions")
-        options = self.page.get_by_label("Publication and mode").locator("option")
-        random_key = next(o.get_attribute("value") for o in options.all() if "random" in o.inner_text())
-        self.page.get_by_label("Publication and mode").select_option(random_key)
-        self.page.get_by_label("Saved version").select_option("original")
-        self.assertEqual(self.paper_ids(self.page.get_by_role("dialog")), first)
+        self.daily()
+        self.assertEqual(self.paper_ids(), initial)
+        self.options().get_by_role("button", name="Regenerate daily selection").click()
+        panel = self.nav("Previous")
+        expect(panel).to_contain_text("saved revisions")
+        key = next(o.get_attribute("value") for o in panel.get_by_label("Publication and mode").locator("option").all()
+                   if "random" in o.inner_text())
+        panel.get_by_label("Publication and mode").select_option(key)
+        panel.get_by_label("Saved version").select_option("original")
+        history_ids = panel.locator('a[href*="/abs/"]').evaluate_all("""links =>
+          links.map(a => new URL(a.href).pathname.slice(5).replace(/v[0-9]+$/, ''))""")
+        self.assertEqual(set(history_ids), set(initial))
+        expect(panel.locator("article.card")).to_have_count(0)
         self.assertEqual(self.page.evaluate("fixtureGM.requests.length"), 0)
 
     def test_daily_keyboard_navigation_background_and_category_browsing(self):
         self.prepare()
-        panel = self.daily()
-        cards = panel.locator("article.card")
-        cards.first.focus()
+        self.daily()
+        ids = self.paper_ids()
+        second = self.visible_rows.nth(1)
+        self.page.locator('dl[id="articles"] > dt:visible a[title="Abstract"]').first.focus()
         self.page.keyboard.press("Alt+j")
-        expect(cards.nth(1)).to_be_focused()
+        focused_id = """() => {
+          const row = document.activeElement?.closest('dt,dd');
+          const head = row?.tagName === 'DD' ? row.previousElementSibling : row;
+          return head?.querySelector('a[title="Abstract"]')?.href.split('/').pop().replace(/v[0-9]+$/, '');
+        }"""
+        self.assertEqual(self.page.evaluate(focused_id), ids[1])
         self.page.keyboard.press("Alt+l")
-        expect(cards.nth(1).get_by_role("button", name="Like", exact=True)).to_have_attribute(
-            "aria-pressed", "true")
+        expect(second.get_by_role("button", name="Like", exact=True)).to_have_attribute("aria-pressed", "true")
         self.page.keyboard.press("Alt+r")
-        expect(cards.nth(1).get_by_role("button", name="Read", exact=True)).to_be_visible()
+        expect(second.get_by_role("button", name="Read", exact=True)).to_be_visible()
         self.page.keyboard.press("Alt+r")
-        expect(cards.nth(1).get_by_role("button", name="Mark as read", exact=True)).to_be_visible()
+        expect(second.get_by_role("button", name="Mark as read", exact=True)).to_be_visible()
         self.page.keyboard.press("Alt+k")
-        expect(cards.first).to_be_focused()
-        cards.nth(1).get_by_role("button", name="Need background").click()
+        self.assertEqual(self.page.evaluate(focused_id), ids[0])
+        second.get_by_role("button", name="Need background").click()
+        expect(second.get_by_role("button", name="Need background")).to_have_attribute("aria-pressed", "true")
         expect(self.nav("Interests")).to_contain_text("0 active interest examples")
-        panel = self.daily()
-        panel.get_by_role("button", name="All papers in a category").click()
-        panel.get_by_label("Category", exact=True).select_option("math.LO")
-        self.assertEqual(len(self.paper_ids(panel)), 2)
-        panel.get_by_label("Category", exact=True).select_option("math.GM")
-        self.assertEqual(self.paper_ids(panel), [])
-        expect(panel.get_by_role("button", name="Next page")).to_be_disabled()
+        self.close_dialog()
+        self.menu("Category")
+        self.controls.get_by_label("Category", exact=True).select_option("math.LO")
+        expect(self.visible_rows).to_have_count(2)
+        self.controls.get_by_label("Category", exact=True).select_option("math.GM")
+        expect(self.visible_rows).to_have_count(0)
+        expect(self.page.locator("article.card")).to_have_count(0)
+        self.menu("All")
+        expect(self.visible_rows).to_have_count(len(ROWS))
 
     def test_feedback_revision_exclusions_reset_restore_and_permanent_deletion(self):
         self.prepare()
-        panel = self.daily()
-        card = panel.locator("article.card").first
-        paper = card.get_attribute("data-paper-id")
+        self.daily()
+        card = self.visible_rows.first
+        paper = self.paper_ids()[0]
         card.get_by_role("button", name="Like", exact=True).click()
         expect(card.get_by_role("button", name="Like", exact=True)).to_have_attribute("aria-pressed", "true")
         card.get_by_role("button", name="Dislike", exact=True).click()
         expect(card.get_by_role("button", name="Dislike", exact=True)).to_have_attribute("aria-pressed", "true")
         card.get_by_role("button", name="Bookmark", exact=True).click()
         card.get_by_role("button", name="Mark as read", exact=True).click()
-        expect(panel).to_contain_text("1 / 3 papers reviewed")
+        expect(self.controls).to_contain_text("1 / 3")
         panel = self.nav("Knowledge")
         panel.get_by_label("Topic", exact=True).fill("sequences")
         panel.get_by_label("Knowledge level").select_option("Advanced")
@@ -449,6 +649,12 @@ class UserscriptBrowserTests(unittest.TestCase):
         self.assertIn(paper, state["bookmarks"])
         self.assertIn(paper, state["reading"])
         self.assertEqual(state["knowledge"]["sequences"]["level"], "Advanced")
+        saved = self.nav("Bookmarks")
+        expect(saved.locator("article.card")).to_have_count(0)
+        saved.get_by_role("button", name="Show in listing").click()
+        expect(self.visible_rows).to_have_count(len(ROWS))
+        focused = self.page.evaluate("document.activeElement.href")
+        self.assertRegex(focused, rf"/abs/{re.escape(paper)}(v1)?$")
         panel = self.nav("Interests")
         panel.get_by_role("button", name="Restore all historical interests").click()
         expect(panel).to_contain_text("1 active interest examples")
@@ -462,13 +668,7 @@ class UserscriptBrowserTests(unittest.TestCase):
     def test_complete_deletion_keeps_current_page_usable_and_new_bookmark_durable(self):
         self.prepare()
 
-        def tools_for(row_index):
-            detail = self.page.locator("dl#articles dd").nth(row_index).locator("details.tools")
-            if detail.get_attribute("open") is None:
-                detail.locator("summary").click()
-            return detail
-
-        first = tools_for(0)
+        first = self.native_rows.first
         first.get_by_role("button", name="Like", exact=True).click()
         first.get_by_role("button", name="Bookmark", exact=True).click()
         expect(first.get_by_role("button", name="Bookmarked")).to_be_visible()
@@ -478,18 +678,19 @@ class UserscriptBrowserTests(unittest.TestCase):
         expect(panel).to_contain_text("All saved Discovery data has been deleted")
         self.close_dialog()
 
-        first = tools_for(0)
+        first = self.native_rows.first
         expect(first.get_by_role("button", name="Bookmark", exact=True)).to_be_visible()
         expect(first.get_by_role("button", name="Like", exact=True)).not_to_have_attribute(
             "aria-pressed", "true")
-        second = tools_for(1)
+        second = self.native_rows.nth(1)
         expect(second.get_by_role("button", name="Bookmark", exact=True)).to_be_visible()
         _, cleared = self.backup()
         for collection in ("bookmarks", "events", "papers", "selections"):
             self.assertFalse(cleared[collection], collection)
 
-        self.assertEqual(len(self.paper_ids(self.daily())), 3)
-        self.close_dialog()
+        self.daily()
+        self.assertEqual(len(self.paper_ids()), 3)
+        self.menu("All")
         second.get_by_role("button", name="Bookmark", exact=True).click()
         expect(second.get_by_role("button", name="Bookmarked")).to_be_visible()
         _, saved = self.backup()
@@ -504,16 +705,14 @@ class UserscriptBrowserTests(unittest.TestCase):
         self.reload_and_mount()
         bookmarks = self.nav("Bookmarks")
         expect(bookmarks).to_contain_text("1 bookmarked papers")
-        paper = bookmarks.locator("article.card")
-        expect(paper).to_have_attribute("data-paper-id", "2611.00002")
-        expect(paper.get_by_role("heading")).to_have_text("Fixture paper 2")
-        expect(paper.get_by_role("link", name="Abstract page")).to_have_attribute(
-            "href", "https://arxiv.org/abs/2611.00002v1")
+        expect(bookmarks.get_by_role("link", name="Fixture paper 2", exact=True)).to_have_attribute(
+            "href", re.compile(r"/abs/2611[.]00002(v1)?$"))
+        expect(bookmarks.locator("article.card")).to_have_count(0)
 
     def test_name_only_subscription_requires_confirmation(self):
         self.prepare()
-        panel = self.daily()
-        follow = panel.locator("article.card").first.get_by_role("button", name="Follow Alex Doe")
+        first = self.native_rows.first
+        follow = first.get_by_role("button", name="Follow Alex Doe")
         prompts = []
         def reject(prompt):
             prompts.append(prompt.message)
@@ -522,116 +721,155 @@ class UserscriptBrowserTests(unittest.TestCase):
         follow.click()
         expect(self.nav("Authors")).to_contain_text("Use Follow")
         self.assertRegex(prompts[0], r"(?i)name.only")
-        panel = self.daily()
+        self.close_dialog()
         self.page.once("dialog", lambda prompt: prompt.accept())
-        panel.locator("article.card").first.get_by_role("button", name="Follow Alex Doe").click()
+        follow.click()
+        expect(first).to_contain_text("Following Alex Doe")
         panel = self.nav("Authors")
         expect(panel).to_contain_text("verify identity")
         panel.get_by_label("Private notes").fill("Compare the linked research areas.")
         panel.get_by_role("button", name="Save notes").click()
         self.daily()
-        self.assertEqual(len(self.paper_ids(self.change_mode("subscriptions"))), len(ROWS))
+        self.change_mode("subscriptions")
+        self.assertEqual(len(self.paper_ids()), len(ROWS))
 
-    def test_dictionary_selection_literal_markup_recursion_and_offline_cache(self):
+    def test_dictionary_literal_markup_recursion_math_and_cache_in_native_row(self):
         self.prepare(listing([ROWS[0]]))
-        panel = self.daily()
-        card = panel.locator("article.card")
-        expect(card.get_by_role("heading")).to_contain_text("<em>notation</em>")
-        self.assertEqual(card.locator("h3 em").count(), 0)
-        card.get_by_text("Original abstract", exact=True).click()
-        expect(card.locator(".abstract")).to_contain_text("<section>example</section>")
-        self.assertEqual(card.locator(".abstract section").count(), 0)
-        formula = card.locator(".abstract math")
-        expect(formula).to_have_count(1)
-        expect(formula.locator("msup")).to_have_count(1)
-        expect(formula.locator("annotation")).to_have_text("x^2")
-        expect(card).to_contain_text("No HTML link supplied")
-        self.close_dialog()
-        self.select_word(self.page.locator(".fixture-word"), "Compactness")
+        row = self.native_rows.first
+        expect(row.locator(".list-title")).to_contain_text("<em>notation</em>")
+        expect(row.locator(".list-title em, .mathjax section")).to_have_count(0)
+        expect(row.locator("p.mathjax")).to_contain_text("$x^2$")
+        self.select_word(row.locator(".fixture-word"), "Compactness")
         self.page.get_by_role("button", name="Explain selection").click()
-        expect(self.page.get_by_role("dialog")).to_have_attribute("aria-label", "Explain: Compactness")
-        expect(self.page.get_by_role("button", name="Open AI settings")).to_be_visible()
+        ai = row.locator(".inline-ai")
+        expect(ai).to_contain_text("Compactness")
+        expect(ai.get_by_role("button", name="Open AI settings")).to_be_visible()
+        expect(self.page.locator("dialog[open]")).to_have_count(0)
         self.assertEqual(self.page.evaluate("fixtureGM.requests.length"), 0)
         self.configure_ai()
         self.page.evaluate("fixtureGM.network = 'ai-answer'")
-        self.select_word(self.page.locator(".fixture-word"), "Compactness")
+        self.select_word(row.locator(".fixture-word"), "Compactness")
         self.page.get_by_role("button", name="Explain selection").click()
-        panel = self.page.get_by_role("dialog")
-        expect(panel.locator(".source")).to_contain_text("ABSTRACT")
-        expect(panel.locator(".answer")).to_contain_text("Literal <em>notation</em>")
-        self.assertEqual(panel.locator(".answer em").count(), 0)
-        panel.get_by_label("My understanding").select_option("partial")
-        self.select_word(panel.locator(".answer"), "Prerequisite")
-        panel.get_by_role("button", name="Explain selection").click()
-        expect(panel).to_have_attribute("aria-label", "Explain: Prerequisite")
-        # A second uncached bridge request shares the real arXiv pacing queue.
-        expect(panel.locator(".answer")).to_be_visible(timeout=22000)
-        self.close_dialog()
+        expect(ai.locator(".source")).to_contain_text("ABSTRACT")
+        expect(ai.locator(".answer")).to_contain_text("Literal <em>notation</em>")
+        expect(ai.locator(".answer em")).to_have_count(0)
+        formula = ai.locator(".answer math")
+        expect(formula.locator("msup")).to_have_count(1)
+        expect(formula.locator("annotation")).to_have_text("x^2")
+        ai.get_by_label("My understanding").select_option("partial")
+        self.select_word(ai.locator(".answer"), "Prerequisite")
+        self.page.get_by_role("button", name="Explain selection").click()
+        expect(ai).to_contain_text("Prerequisite")
+        # The uncached recursive request shares the real arXiv pacing queue.
+        expect(ai.locator(".answer")).to_be_visible(timeout=22000)
+        expect(self.page.locator("dialog[open]")).to_have_count(0)
         self.page.evaluate("fixtureGM.network = 'offline'")
-        self.select_word(self.page.locator(".fixture-word"), "Compactness")
+        self.select_word(row.locator(".fixture-word"), "Compactness")
         self.page.get_by_role("button", name="Explain selection").click()
-        expect(panel.locator(".source")).to_contain_text("Cached")
+        expect(ai.locator(".source")).to_contain_text("Cached")
         self.assertEqual(self.page.evaluate("fixtureGM.requests.length"), 2)
         panel = self.nav("Knowledge")
         expect(panel).to_contain_text("Compactness")
         expect(panel).to_contain_text("Prerequisite")
+        self.assertTrue(self.page.evaluate("fixtureNativeUnchanged()"))
 
-    def test_explicit_ai_errors_keep_paper_and_controls_usable(self):
+    def test_provider_failure_stays_at_correct_paper(self):
         self.prepare()
         self.configure_ai()
         self.assertEqual(self.page.evaluate("fixtureGM.requests.length"), 0)
         self.page.evaluate("fixtureGM.network = 'ai-error'")
-        self.daily().locator("article.card").first.get_by_role("button", name="AI overview").click()
-        panel = self.page.get_by_role("dialog")
-        expect(panel.locator(".error")).to_contain_text("Fixture provider unavailable")
-        expect(panel.get_by_role("button", name="Check AI settings")).to_be_visible()
-        self.assertEqual(panel.locator(".answer").count(), 0)
+        row = self.native_rows.nth(2)
+        row.get_by_role("button", name="AI overview").click()
+        ai = row.locator(".inline-ai")
+        expect(ai.locator(".error")).to_contain_text("Fixture provider unavailable")
+        expect(ai.get_by_role("button", name="Check AI settings")).to_be_visible()
+        expect(ai.locator(".answer")).to_have_count(0)
+        expect(self.page.locator("dialog[open]")).to_have_count(0)
+        expect(self.page.locator(".inline-ai")).to_have_count(1)
         requests = self.page.evaluate("fixtureGM.requests")
         self.assertEqual(len(requests), 1)
         self.assertEqual(requests[0]["url"], "http://127.0.0.1:4317/v1/explain")
+        self.assertEqual(requests[0]["body"]["paper"]["id"], "2611.00003")
         self.assertTrue(requests[0]["body"]["noSpoilers"])
         self.assertTrue(set(requests[0]["body"]).isdisjoint({"events", "bookmarks", "subscriptions", "reading"}))
-        expect(self.daily().locator("article.card").first).to_be_visible()
+        expect(row.locator(".list-title")).to_contain_text("Fixture paper 3")
+        row.get_by_role("button", name="Bookmark", exact=True).click()
+        expect(row.get_by_role("button", name="Bookmarked")).to_be_visible()
 
     def partial(self):
-        link = '<a href="?skip=1&amp;show=1">Next page</a>'
-        self.prepare(listing([ROWS[0]], total=2, page_link=link))
-        panel = self.nav("Daily selection")
-        expect(panel).to_contain_text("Only 1 of 2 entries")
-        self.assertEqual(self.paper_ids(panel), [])
+        links = '<a href="?skip=1&amp;show=1">Next page</a> <a href="?skip=0&amp;show=2">All</a>'
+        self.prepare(listing([ROWS[0]], total=2, page_link=links))
+        self.menu("Daily")
+        expect(self.controls).to_contain_text("1 of 2")
+        expect(self.visible_rows).to_have_count(1)
+        expect(self.page.locator("article.card, dialog[open]")).to_have_count(0)
+        self.assertEqual(self.page.evaluate("GM_listValues().filter(k=>k.includes(':selections:'))"), [])
+        link = self.controls.get_by_role("link", name="Open complete arXiv listing")
+        expect(link).to_be_visible()
         self.assertEqual(self.page.evaluate("fixtureGM.requests.length"), 0)
-        return panel
+        return link
 
-    def test_partial_listing_failure_never_generates_a_biased_feed(self):
-        panel = self.partial()
-        self.page.evaluate("fixtureGM.network = 'limited'")
-        panel.get_by_role("button", name="Load complete publication").click()
-        expect(panel).to_contain_text("HTTP 429")
-        self.assertEqual(self.paper_ids(panel), [])
-        self.assertEqual(self.page.evaluate("fixtureGM.requests.length"), 1)
+    def test_incomplete_listing_leaves_native_rows_and_never_samples_missing_papers(self):
+        link = self.partial()
+        self.page.evaluate("fixtureGM.network = 'offline'")
+        href = link.evaluate("a => [a.origin, a.pathname, Number(new URL(a.href).searchParams.get('show'))]")
+        self.assertEqual(href[:2], ["https://arxiv.org", "/list/math/new"])
+        self.assertGreaterEqual(href[2], 2)
+        self.assertTrue(self.page.evaluate("fixtureNativeUnchanged()"))
+        self.menu("All")
+        expect(self.visible_rows).to_have_count(1)
+        self.assertEqual(self.page.evaluate("fixtureGM.requests.length"), 0)
+
+        # The page-level launcher is available even when there is no first paper.
+        self.context.unroute("**/*")
+        self.context.route("**/*", fixtures_only(listing([])))
+        self.reload_and_mount()
+        self.open_page_settings().get_by_role("button", name="Show daily selection", exact=True).click()
+        expect(self.controls).to_contain_text("0 / 0")
+        expect(self.native_rows).to_have_count(0)
+        self.menu("All")
         self.assertTrue(self.page.evaluate("fixtureNativeUnchanged()"))
 
-    def test_partial_listing_recovers_on_demand(self):
-        panel = self.partial()
-        self.page.evaluate("(s) => {fixtureGM.network='page'; fixtureGM.responseHTML=s;}", listing(ROWS[:2]))
-        panel.get_by_role("button", name="Load complete publication").click()
-        expect(panel.get_by_text("End of this daily selection.", exact=True)).to_be_visible()
-        self.assertEqual(len(self.paper_ids(panel)), 1)  # both eligible papers are in math.LO
-        self.assertEqual(self.page.evaluate("fixtureGM.requests.length"), 1)
-        self.assertTrue(self.page.evaluate("fixtureNativeUnchanged()"))
+    def test_complete_listing_opens_a_native_arxiv_page_and_recovers(self):
+        link = self.partial()
+        destination = link.evaluate("a=>a.href")
+        self.context.route(destination, fixtures_only(listing([ROWS[0], ROWS[2]]), destination))
+        if link.get_attribute("target") == "_blank":
+            with self.context.expect_page() as tab:
+                link.click()
+            self.page = tab.value
+            self.page.on("pageerror", lambda error: self.errors.append(str(error)))
+        else:
+            link.click()
+        self.page.wait_for_url(destination, wait_until="networkidle")
+        self.mount()
+        self.daily()
+        self.assertEqual(self.paper_ids(), ["2611.00001", "2611.00003"])
+        expect(self.native_rows).to_have_count(2)
+        self.assertTrue(self.page.evaluate("fixtureNativeUnchanged(true)"))
 
-    def test_mobile_modal_keyboard_and_json_backup_import(self):
+    def test_mobile_native_tools_and_backup_import(self):
         self.page.set_viewport_size({"width": 390, "height": 844})
         self.prepare()
-        panel = self.daily()
-        card = panel.locator("article.card").first
-        paper = card.get_attribute("data-paper-id")
-        card.get_by_role("button", name="Bookmark", exact=True).click()
+        button = self.settings_button
+        expect(button).to_be_in_viewport()
+        box = button.bounding_box()
+        first_paper = self.page.locator('dl[id="articles"] > dt').first.bounding_box()
+        self.assertGreater(box["x"], 195)
+        self.assertLessEqual(box["x"] + box["width"], 390)
+        self.assertLess(box["y"], first_paper["y"])
+        button.focus()
+        self.page.keyboard.press("Enter")
+        expect(self.page.get_by_role("dialog", name="Discovery settings")).to_be_visible()
         self.page.keyboard.press("Escape")
-        expect(self.page.locator("dialog[open]")).to_have_count(0)
+        expect(button).to_be_focused()
+        first = self.native_rows.first
+        first.get_by_role("button", name="Bookmark", exact=True).click()
+        expect(first.get_by_role("button", name="Bookmarked")).to_be_visible()
         data, state = self.backup()
-        self.assertIn(paper, state["bookmarks"])
+        self.assertIn("2611.00001", state["bookmarks"])
         self.assertFalse(state["settings"]["ai"]["token"])
+        panel = self.page.get_by_role("dialog")
         box = panel.bounding_box()
         self.assertIsNotNone(box)
         self.assertGreaterEqual(box["x"], 0)
@@ -649,7 +887,7 @@ class UserscriptBrowserTests(unittest.TestCase):
         expect(panel).to_contain_text("Backup imported")
         expect(self.nav("Bookmarks")).to_contain_text("1 bookmarked papers")
 
-    def test_persistent_profile_restart_keeps_pinned_selection(self):
+    def test_persistent_profile_restart_keeps_tool_preference_mode_selection_and_bookmark(self):
         with tempfile.TemporaryDirectory(prefix="arxiv-discovery-browser-") as directory:
             def start_profile():
                 context = self.playwright.chromium.launch_persistent_context(
@@ -664,17 +902,35 @@ class UserscriptBrowserTests(unittest.TestCase):
                 return context
             first = start_profile()
             try:
-                panel = self.daily()
-                pinned = self.paper_ids(panel)
-                panel.locator("article.card").first.get_by_role("button", name="Bookmark", exact=True).click()
-                expect(panel.locator("article.card").first.get_by_role("button", name="Bookmarked")).to_be_visible()
+                panel = self.open_page_settings()
+                self.pick_mode(panel, "balanced")
+                self.close_dialog()
+                expect(self.visible_rows).to_have_count(len(ROWS))
+                expect(self.controls).to_have_count(0)
+                self.open_page_settings().get_by_role("button", name="Show daily selection", exact=True).click()
+                self.await_mode("balanced")
+                pinned = self.paper_ids()
+                row = self.visible_rows.first
+                row.get_by_role("button", name="Bookmark", exact=True).click()
+                expect(row.get_by_role("button", name="Bookmarked")).to_be_visible()
+                self.open_page_settings().get_by_label("Enable paper tools").uncheck()
+                self.close_dialog()
+                expect(self.visible_rows).to_have_count(len(ROWS))
             finally:
                 first.close()
             second = start_profile()
             try:
-                panel = self.daily()
-                self.assertEqual(self.paper_ids(panel), pinned)
-                expect(panel.locator("article.card").first.get_by_role("button", name="Bookmarked")).to_be_visible()
+                expect(self.native_rows.locator("[data-arxiv-discovery]")).to_have_count(0)
+                panel = self.open_page_settings()
+                toggle = panel.get_by_label("Enable paper tools")
+                expect(toggle).not_to_be_checked()
+                expect(panel.get_by_label("Recommendation mode")).to_have_value("balanced")
+                toggle.check()
+                panel.get_by_role("button", name="Show daily selection", exact=True).click()
+                self.await_mode("balanced")
+                self.assertEqual(self.paper_ids(), pinned)
+                expect(self.visible_rows.first.get_by_role(
+                    "button", name="Bookmarked")).to_be_visible()
             finally:
                 second.close()
 

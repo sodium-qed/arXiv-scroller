@@ -153,3 +153,70 @@ test('an interrupted import rolls back earlier rows, and an interrupted deletion
   a.remove = remove;
   assert.deepEqual((await new Store(a).initialize()).events, []);
 });
+
+test('simultaneous first selections pin one draw and reading it again produces no change notification', async () => {
+  const a = adapter();
+  let notifications = 0;
+  const save = a.set;
+  a.set = async (key, value) => {
+    if (key === 'arxiv-discovery:v1:revision') notifications++;
+    await save(key, value);
+  };
+  const first = new Store(a), second = new Store(a);
+  await first.initialize();
+  const generation = await first.generation();
+  const key = '2026-11-26|random|new|originals|32|math';
+  function draw(seed) {
+    const selection = {mode:'random', date:'2026-11-26', seed, entries:[], missing:[]};
+    return {original:selection, current:selection, revisions:[], createdAt:'2026-11-26T00:00:00Z'};
+  }
+  const [one, two] = await Promise.all([
+    first.getOrCreateSelection(key, draw('first-tab'), generation),
+    second.getOrCreateSelection(key, draw('second-tab'), generation)
+  ]);
+  assert.deepEqual(one, two);
+  assert.deepEqual(await second.get('selections', key), one);
+  assert.deepEqual(await first.getOrCreateSelection(key, draw('later'), generation), one);
+  assert.equal(notifications, 1);
+  await first.clearCollection('selections');
+  assert.equal(await second.getOrCreateSelection(key, draw('stale'), generation), null);
+  assert.equal(await first.get('selections', key), null);
+  assert.equal(notifications, 2);
+});
+
+test('overlapping selection edits preserve the complete winning history, original and paper snapshots', async () => {
+  const shared = adapter();
+  const first = new Store(shared), second = new Store(shared);
+  await first.initialize();
+  const key = '2026-11-26|random|new|originals|32|math';
+  const generation = await first.generation();
+  const selection = {mode:'random', date:'2026-11-26', seed:'original', entries:[], missing:[]};
+  const before = await first.getOrCreateSelection(key, {original:selection, current:selection, revisions:[],
+    createdAt:'2026-11-26T00:00:00Z', paperSnapshots:{[paper.id]:paper}}, generation);
+  const alternate = {...paper, id:'2611.00010', versionedId:'2611.00010v1', links:{}};
+  const additions = {[alternate.id]:alternate};
+  const proposals = await Promise.all([
+    first.commitSelectionRevision(key, before, {...selection, seed:'edit-1'}, additions, generation),
+    second.commitSelectionRevision(key, before, {...selection, seed:'edit-2'}, additions, generation)
+  ]);
+  const committed = proposals.filter(Boolean);
+  assert.equal(committed.length, 1);
+  assert.equal(proposals.filter(record => record === null).length, 1);
+  const [winner] = committed;
+  assert.deepEqual(winner.original, before.original);
+  assert.deepEqual(winner.revisions, [before.current]);
+  assert.equal(winner.paperSnapshots[paper.id].title, paper.title);
+  assert.equal(winner.paperSnapshots[alternate.id].id, alternate.id);
+  assert.deepEqual(await second.get('selections', key), winner);
+
+  // A conflicting base can have the same revision count. Check the actual draw.
+  const changedBase = {...winner, current:{...winner.current, seed:'different-current'}};
+  assert.equal(await first.commitSelectionRevision(key, changedBase, selection, {}, generation), null);
+  const restored = await second.commitSelectionRevision(key, winner, before.original, {}, generation);
+  assert.deepEqual(restored.revisions, [before.current, winner.current]);
+  assert.deepEqual(restored.current, before.original);
+
+  await first.clearCollection('selections');
+  assert.equal(await second.commitSelectionRevision(key, restored, selection, additions, generation), null);
+  assert.equal(await first.get('selections', key), null);
+});

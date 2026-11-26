@@ -305,6 +305,40 @@ class BridgeTests(unittest.TestCase):
             self.assertNotIn("tools", payload)
             self.assertNotIn(cfg.api_key, kwargs["body"].decode())
 
+    def test_quick_profile_uses_abstract_without_network_and_preserves_caps(self):
+        raw = {**self.raw, "profile": "quick", "limits": {**self.raw["limits"], "maxInputChars": 18000, "maxOutputTokens": 1600}}
+        req = bridge.validate_request(raw, self.cfg)
+        self.assertEqual((req["max_chars"], req["max_tokens"]), (4000, 768))
+        def unexpected_fetch(*args):
+            self.fail("Quick overview fetched the full paper")
+        def provider(cfg, request, messages):
+            data = json.loads(messages[1]["content"])
+            self.assertEqual(data["source_type"], "abstract")
+            self.assertEqual(data["passages"][0]["text"], ABSTRACT)
+            self.assertEqual(len(data["requested_fields"]), 4)
+            self.assertIn("existential statement", messages[0]["content"])
+            return completion(messages)
+        result = bridge.Application(self.cfg, bridge.SourceRepository(unexpected_fetch), provider).handle(raw)
+        self.assertEqual(result["source"]["kind"], "abstract")
+        self.assertIn("full paper was not retrieved", result["source"]["note"])
+
+    def test_local_sse_accumulates_structured_answer_and_rejects_truncation(self):
+        import io
+        import time
+        frames = [
+            {"choices": [{"index": 0, "delta": {"content": '{"sections":'}, "finish_reason": None}]},
+            {"choices": [{"index": 0, "delta": {"content": '[]}'}, "finish_reason": "stop"}],
+             "usage": {"prompt_tokens": 5, "completion_tokens": 4}},
+        ]
+        raw = b"".join(b"data: " + bridge.json_bytes(frame) + b"\n\n" for frame in frames)
+        events = []
+        result = bridge.read_provider_stream(io.BytesIO(raw + b"data: [DONE]\n\n"), lambda *x: events.append(x), time.monotonic()+2)
+        self.assertEqual(json.loads(result["choices"][0]["message"]["content"]), {"sections": []})
+        self.assertEqual(result["usage"]["completion_tokens"], 4)
+        self.assertTrue(events)
+        with self.assertRaises(ValueError):
+            bridge.read_provider_stream(io.BytesIO(raw), lambda *x: None, time.monotonic()+2)
+
     def test_invalid_request_fields_cannot_change_transport_or_disable_server_caps(self):
         cfg = replace(self.cfg, max_tokens=100, daily_requests=2)
         req = bridge.validate_request(self.raw, cfg)

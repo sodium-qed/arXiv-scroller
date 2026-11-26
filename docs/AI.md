@@ -1,0 +1,147 @@
+# Optional AI reading assistant
+
+The userscript works immediately with AI disabled. To generate overviews or contextual definitions, run the Python bridge on the same computer as Chrome and pair it with Tampermonkey. The bridge connects to a model you choose. No credentials, model weights, or hosted account come with the application.
+
+## Local setup
+
+1. Install Python 3.10 or newer. From the repository root, optionally install `pypdf` in your Python environment to enable the PDF fallback.
+
+   ~~~sh
+   python -m pip install -r bridge/requirements.txt
+   ~~~
+
+2. Start a local inference service that supports OpenAI-compatible Chat Completions and JSON object output. For example, download a local model such as `gemma3:4b` in Ollama. With the model downloaded, configure the **Ollama service** with `OLLAMA_NO_CLOUD=1` and restart it to keep inference on your hardware. An example invocation for a manually managed Ollama service follows. Its context window must fit the prompt, source excerpts and output allowance. [Ollama local settings](https://docs.ollama.com/faq) · [Ollama model example](https://ollama.com/library/gemma3)
+
+   ~~~sh
+   OLLAMA_NO_CLOUD=1 OLLAMA_CONTEXT_LENGTH=16384 ollama serve
+   ~~~
+
+3. In another terminal, set the bridge environment. The following commands use Bash. Keep this terminal private. The printed value is the pairing token that belongs in the userscript's pairing prompt. Reuse the same private token between starts or pair again after rotating it.
+
+   ~~~sh
+   export ARXIV_AI_PROVIDER=local
+   export ARXIV_AI_MODELS=gemma3:4b
+   export ARXIV_AI_MAX_INPUT_CHARS=18000
+   export ARXIV_AI_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+   printf '%s\n' "$ARXIV_AI_TOKEN"
+   python bridge/server.py
+   ~~~
+
+4. Open the Discovery AI settings on arXiv. Select the local provider, enter the same model name, and use `http://127.0.0.1:4317` for the bridge. Pair using the token, review the data-transmission disclosure and enable on-demand generation. Click **AI Overview** or request a definition. The model's readiness, context capacity and speed depend on the inference service. A first model load may take longer than subsequent calls.
+
+The local provider uses `http://127.0.0.1:11434/v1/chat/completions`. An OpenAI-compatible server on another local port can be selected with `ARXIV_AI_LOCAL_PORT`. The local service operator controls what happens after a request reaches that endpoint. Choose locally installed weights and disable any cloud forwarding to keep the prompt on the computer. [Ollama compatibility reference](https://docs.ollama.com/api/openai-compatibility)
+
+### Windows PowerShell
+
+Open PowerShell in the repository folder. If you manage Ollama from a terminal, set `$env:OLLAMA_NO_CLOUD = '1'` and `$env:OLLAMA_CONTEXT_LENGTH = '16384'` in that terminal before starting `ollama serve`. A running desktop Ollama service must be restarted with its intended configuration. In a separate PowerShell window, start the bridge with the name of the model you have downloaded.
+
+~~~powershell
+$env:ARXIV_AI_PROVIDER = 'local'
+$env:ARXIV_AI_MODELS = 'gemma3:4b'
+$env:ARXIV_AI_MAX_INPUT_CHARS = '18000'
+$env:ARXIV_AI_TOKEN = (python -c "import secrets; print(secrets.token_urlsafe(32))")
+Write-Output $env:ARXIV_AI_TOKEN
+python bridge/server.py
+~~~
+
+Copy the printed pairing token into **Settings → Pair / replace bridge token** and complete step 4 above. Keep the bridge terminal open while requesting explanations. If the installation provides the Windows Python launcher, `py -3` can replace `python` in these commands.
+
+## Hosted OpenAI setup
+
+Use an OpenAI API project with access to a Chat Completions model supporting system instructions, JSON object mode and `max_completion_tokens`. API access and usage depend on the API organization and its billing settings. Enter the current standard input and output rates in USD per million tokens. For multiple allowed models, use the highest applicable rate in each direction. [Chat Completions reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) · [Current API prices](https://developers.openai.com/api/docs/pricing) · [API billing](https://help.openai.com/en/articles/9039756-managing-billing-for-chatgpt-and-the-api-platform)
+
+Use the same pairing-token setup as above. In the **bridge terminal**, set the following values, then start the bridge. The prompts below accept credentials and configuration without hardcoding example secrets or price assumptions. In the userscript select **OpenAI** and the exact model name, review the disclosure, and enable generation.
+
+~~~bash
+export ARXIV_AI_PROVIDER=openai
+read -rp 'Allowed model name: ' ARXIV_AI_MODELS
+read -rsp 'OpenAI API key: ' OPENAI_API_KEY
+printf '\n'
+read -rp 'Input USD per million tokens: ' ARXIV_AI_INPUT_USD_PER_MILLION
+read -rp 'Output USD per million tokens: ' ARXIV_AI_OUTPUT_USD_PER_MILLION
+export ARXIV_AI_MODELS OPENAI_API_KEY ARXIV_AI_INPUT_USD_PER_MILLION ARXIV_AI_OUTPUT_USD_PER_MILLION
+export ARXIV_AI_DAILY_USD=1
+python bridge/server.py
+~~~
+
+In Windows PowerShell, use the same generated pairing token and enter the hosted API credential at the masked prompt. Supply current rates for the model before starting the bridge.
+
+~~~powershell
+$env:ARXIV_AI_PROVIDER = 'openai'
+$env:ARXIV_AI_MODELS = Read-Host 'Allowed model name'
+$secret = Read-Host 'OpenAI API key' -AsSecureString
+$env:OPENAI_API_KEY = [System.Net.NetworkCredential]::new('', $secret).Password
+$env:ARXIV_AI_INPUT_USD_PER_MILLION = Read-Host 'Input USD per million tokens'
+$env:ARXIV_AI_OUTPUT_USD_PER_MILLION = Read-Host 'Output USD per million tokens'
+$env:ARXIV_AI_DAILY_USD = '1'
+python bridge/server.py
+~~~
+
+Hosted requests use the fixed HTTPS endpoint at `api.openai.com/v1/chat/completions` and set `store: false`. The provider's account and data-handling policies still apply. The API credential belongs exclusively in the bridge process environment. Paste only the separate **pairing token** into the userscript. A provider or model mismatch stops the request before paper retrieval or inference.
+
+## What leaves the browser
+
+| Destination | Data |
+| --- | --- |
+| Paired bridge on this computer | arXiv ID and version, title, original abstract, listing date if known, selected operation, term, follow-up question and optional surrounding reading context, up to 64 editable knowledge topics and levels, spoiler policy, configuration limits, model name |
+| arXiv | HTTPS requests for the selected public paper's canonical HTML and, when needed, PDF. The bridge strips browser cookies and spaces its downloads at least 15 seconds apart with one active arXiv connection. A backoff response pauses further downloads. |
+| Selected model | Title, arXiv identifier, labeled source excerpts, selected term or question, optional surrounding sentence or earlier-answer excerpt, knowledge topics and levels, requested response fields, and reading instructions |
+| Local usage database | UTC day, number of provider attempts, and charged or reserved estimated microdollars |
+
+The request builder has an explicit field allowlist. Feedback, interest estimates, subscriptions, reading history, bookmarks, the complete glossary and the pairing token stay out of model prompts. With more than 64 knowledge topics, names present in the paper or reader's input receive priority. Model calls occur on reader requests. Loading a listing creates no provider traffic.
+
+## Source selection and citations
+
+1. The bridge requests the matching `https://arxiv.org/html/<id-and-version>` and extracts the article body. It retains actual HTML section or theorem anchors, prefers available TeX alternatives for math and ignores scripts, navigation and hidden content.
+2. If HTML is unavailable or unusable, the bridge tries the matching PDF when `pypdf` is installed. A short-lived worker reads the text of each page under a timeout and available OS resource limits. It rejects encrypted, image-only, oversized, evidently garbled or unmapped mathematical-font pages. It does not perform OCR. A densely symbolic page can fail these conservative checks. Even a legible extraction can lose superscripts, alignment or character order. Links open the original PDF at the corresponding page. [pypdf extraction guide](https://pypdf.readthedocs.io/en/stable/user/extract-text.html)
+3. A failed full-text attempt falls back to the page's original abstract and identifies the reason. With no usable source, the bridge stops before calling the provider.
+
+For a long source, the bridge selects passages up to the excerpt limit. Dictionary requests favor occurrences of the selected term. Overviews sample across the article. Each answer states the source and how much extracted text was supplied. An unversioned listing points at the current arXiv record and carries an explicit note. Public source text stays in a bounded in-memory cache of up to 24 papers. Positive entries expire after one day for explicit versions and one hour for unversioned IDs. A failed acquisition is cached for five minutes.
+
+The bridge gives the model passage identifiers. A paper-specific response field needs an exact short quotation from one of those passages. The bridge generates citation URLs from the actual paper location. Missing evidence produces a visible unavailable field. A general dictionary definition can still be returned when the paper does not establish a particular use of the term. Generated definitions and illustrative examples carry a general-background label when uncited. A source match verifies the text of a quotation. Readers can inspect the cited section or page to check interpretation, proof status and significance.
+
+## Independent research and follow-ups
+
+The paper-specific setting overrides the global default. Protected mode supplies only selected background material and requests orientation, the question, prerequisites and connections. It omits results and proof fields. It also recognizes explicit proof requests and suppresses identifiable proof disclosures in the generated fields. For a research question whose title already states the answer or for an unusually worded passage, automated filters cannot guarantee spoiler-free wording. Keep the policy enabled for definitions and background, and explicitly change it for a paper before requesting its methods or results.
+
+Definitions support standard, simpler and rigorous explanations, an illustrative example, prerequisite topics, and a source-linked account of the term's use. A follow-up can include a short previous-answer excerpt to clarify a pronoun or a recursively selected term. An earlier generated explanation can supply context for a question. Only quotations from the acquired paper can establish a paper-specific claim.
+
+## Limits and cost
+
+| Bridge environment variable | Default | Meaning |
+| --- | --- | --- |
+| `ARXIV_AI_PROVIDER` | `local` | `local` or `openai`. Must match browser consent. |
+| `ARXIV_AI_MODELS` | Required | Comma-separated model allowlist. The browser requests one exact model. |
+| `ARXIV_AI_TOKEN` | Required | Random URL-safe pairing token of 32–256 characters. |
+| `OPENAI_API_KEY` | Required for hosted | Provider credential read only by the hosted bridge. |
+| `ARXIV_AI_PORT` | `4317` | Bridge port on literal IPv4 loopback. |
+| `ARXIV_AI_LOCAL_PORT` | `11434` | Local model service port on literal IPv4 loopback. |
+| `ARXIV_AI_MAX_INPUT_CHARS` | `100000` | Maximum source text characters per request, 256–120000. The system prompt and reader context also consume tokens. |
+| `ARXIV_AI_MAX_OUTPUT_TOKENS` | `1600` | Maximum completion tokens per request, 64–8192. |
+| `ARXIV_AI_DAILY_REQUESTS` | `10` | Combined UTC-day provider attempts, 0–10000. |
+| `ARXIV_AI_DAILY_USD` | `1` | Maximum estimated daily charges across all clients of the ledger, 0–10000 USD. |
+| `ARXIV_AI_INPUT_USD_PER_MILLION` / `ARXIV_AI_OUTPUT_USD_PER_MILLION` | `0` for local | Positive values required for hosted. The effective rates are the greater of server and browser rates. |
+| `ARXIV_AI_USAGE_DB` | `~/.arxiv-discovery/usage.sqlite3` | Persistent aggregate daily usage database. |
+
+Browser limits can further lower the bridge's count, budget, excerpt and output caps. Before a provider call, one SQLite transaction reserves one request and the estimated maximum charge. The bound uses the UTF-8 byte length of the serialized messages plus 1,024 tokens of margin, and the entire output allowance. The model might split mathematical notation and non-ASCII text very differently from ordinary English. A short excerpt can therefore make a substantial difference in whether a tight budget permits the request.
+
+When the provider reports actual token counts, the bridge settles the reservation at the configured prices. Failed or interrupted provider attempts still consume a request. Missing usage retains the conservative cost reservation. The browser never automatically retries a failed generation. Local limits use the prices you supply, so compare them with the provider's current rates and account-level controls when real charges matter. Cached answers require no provider call.
+
+The browser cache key includes the source record, version and known announcement date, provider, bridge origin, model, protection policy, knowledge topics, task, term, context, follow-up, detail, model limits and prompt version. Unversioned answers refresh after an hour. Abstract fallbacks for explicit versions refresh after one day. To remove bridge-side information, stop the bridge to clear its in-memory source cache. The aggregate ledger file can be removed from its configured path after stopping the bridge. Deleting it also resets daily enforcement. Changing the pairing token and restarting revokes the old token.
+
+## Transport and validation
+
+The bridge binds only `127.0.0.1`, validates the Host and supported caller Origin, requires an exact secret bearer token with constant-time comparison, and emits no cross-origin access grants. The privileged userscript transport sends plain JSON to that literal loopback origin. Paper IDs, model names, inputs and sizes are validated. The source fetcher constructs URLs from a validated ID and only accepts a narrowly matched arXiv redirect for the same paper. Provider redirects are never followed. Provider destinations come from the operator's fixed backend selection. Paper or reader text cannot select a destination, run a program or invoke tools.
+
+The HTTP transport has separate per-call output limits and timeouts. A local process with access to your browser profile, terminal or environment may also be able to read the pairing secret. Generated mathematical prose can still be wrong even when it quotes a real passage. The interface returns an explicit error if an overview supplies no verifiable paper-specific field, the provider refuses or times out, or the response exceeds its allowed output.
+
+## Offline validation
+
+From the repository root run the following commands. The bridge suite uses a real loopback HTTP server, an injected fixture arXiv fetcher and a local test-model responder. Hosted request shape is checked without contacting OpenAI. With `pypdf` installed, the suite also starts the real isolated PDF worker.
+
+~~~sh
+node --test tests/ai.test.js
+python -m unittest discover -s tests -p test_bridge.py -v
+~~~
+
+Validated against the official [OpenAI Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create), [Ollama OpenAI compatibility](https://docs.ollama.com/api/openai-compatibility), [pypdf extraction documentation](https://pypdf.readthedocs.io/en/stable/user/extract-text.html), [arXiv web crawler rules](https://arxiv.org/robots.txt) and [arXiv access guidance](https://info.arxiv.org/help/api/tou.html) on 2026-11-26. Network availability, access permissions and mathematical answer quality depend on the chosen live services.

@@ -1,0 +1,13 @@
+{
+  "source": "User-supplied arXiv mathematics listing HTML",
+  "announcementDate": "2026-11-26",
+  "counts": {
+    "new": 379,
+    "cross": 61,
+    "replacement": 261,
+    "total": 701
+  },
+  "uncompressedBytes": 1730503,
+  "sha256": "f922a1ee27211f4460d2d122f69af4fcfb37532d72bf9d7471862710d445ceb3",
+  "compressedFile": "arxiv-math-new.html.gz"
+}

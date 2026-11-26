@@ -1,0 +1,2 @@
+# Optional. HTML, abstract fallback, provider transport, and the ledger use Python's standard library.
+pypdf>=6.10,<8

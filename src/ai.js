@@ -1,5 +1,6 @@
 // Changing the grounding protocol or response policy must invalidate old explanations.
 const PROMPT_VERSION = 1;
+const CACHE_VERSION = 2;
 const ID_PATTERN = /^(?:\d{4}\.\d{4,5}|[a-z][a-z.-]*\/\d{7})$/i;
 const MODEL_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/;
 const LEVELS = new Set(['unfamiliar', 'introduced', 'developing', 'comfortable', 'proficient', 'advanced']);
@@ -143,6 +144,13 @@ export class AIClient {
       throw new Error('A valid arXiv paper and version are required.');
     }
     const limits = requestLimits(ai);
+    const profile = provider === "local" ? (options.profile || (options.detail === "rigorous" || options.question ? "full" : ai.profile || "quick")) : "full";
+    if (!["quick", "full"].includes(profile)) throw new Error("Choose a supported AI reading profile.");
+    if (profile === "quick") {
+      limits.maxInputChars = Math.min(limits.maxInputChars, 4000);
+      limits.maxOutputTokens = Math.min(limits.maxOutputTokens, 768);
+    }
+    const timeout = numericSetting(ai.timeoutSeconds, 420, 60, 600, true) * 1000;
     const detail = DETAIL_VALUES.get(String(options.detail || 'standard').toLowerCase());
     if (!detail) throw new Error('Choose a standard, simpler, or rigorous explanation.');
     const question = boundedText(options.question, 2000, 'The follow-up question');
@@ -158,9 +166,9 @@ export class AIClient {
     };
     const context = [metadata.title, metadata.abstract, term, question, readerContext].join(' ').toLowerCase();
     const knowledge = profileTopics(await this.getKnowledge(), context);
-    const prompt = { protocol: PROMPT_VERSION, provider, model: ai.model, action, paper: metadata,
+    const prompt = { protocol: PROMPT_VERSION, provider, model: ai.model, profile, action, paper: metadata,
       noSpoilers, detail, term, question, context: readerContext, knowledge };
-    const stamp = await fingerprint([origin, prompt, limits.maxInputChars, limits.maxOutputTokens]);
+    const stamp = await fingerprint([CACHE_VERSION, origin, prompt, limits.maxInputChars, limits.maxOutputTokens]);
     const key = 'ai:' + paper.id + ':v' + paper.version + ':' + stamp;
     if (generation !== await this.getGeneration()) throw new Error('Saved data changed while preparing this request. Please request the explanation again.');
     const saved = await this.cacheGet(key);
@@ -175,27 +183,50 @@ export class AIClient {
       throw new Error('The configured daily AI allowance is zero.');
     }
     if (generation !== await this.getGeneration()) throw new Error('Saved data changed while preparing this request. Please request the explanation again.');
-    const work = this.send(origin, ai.token, { ...prompt, limits }, key, generation);
+    const work = this.send(origin, ai.token, { ...prompt, limits, progress: provider === "local" }, key, generation, timeout, options.onProgress);
     this.pending.set(pendingKey, work);
     try { return await work; } finally { this.pending.delete(pendingKey); }
   }
 
-  async send(origin, token, body, key, generation) {
+  async send(origin, token, body, key, generation, timeout, onProgress) {
     const endpoint = origin + '/v1/explain';
     let reply;
+    let consumed = 0;
+    const receiveProgress = text => {
+      if (typeof text !== "string" || typeof onProgress !== "function") return;
+      const lines = text.split("\n");
+      for (let i = consumed; i < lines.length - 1; i++) {
+        try {
+          const event = JSON.parse(lines[i]);
+          if (event.type === "progress" && ["retrieving", "generating", "validating"].includes(event.phase)) onProgress(event.phase, Number.isSafeInteger(event.chunks) && event.chunks >= 0 ? event.chunks : 0);
+        } catch { /* Ignore incomplete/non-stream progress; final response is validated below. */ }
+      }
+      consumed = Math.max(consumed, lines.length - 1);
+    };
     try {
       reply = await this.request(endpoint, { method: 'POST', headers: {
         'Content-Type': 'application/json', Authorization: 'Bearer ' + token
-      }, body: JSON.stringify(body), timeout: 225000, redirect: 'error' });
+      }, body: JSON.stringify(body), timeout, redirect: 'error', onProgress: receiveProgress });
     } catch {
       throw new Error('The local AI bridge did not respond. Check its address, pairing, and running process. Requests are never retried automatically.');
     }
     if (reply.finalUrl && reply.finalUrl !== endpoint) throw new Error('The local bridge returned a redirect.');
     let data;
-    try { data = JSON.parse(reply.text); } catch { throw new Error('The local bridge returned an unreadable response.'); }
-    if (reply.status !== 200) {
+    let status = reply.status;
+    try {
+      if (/^\s*\{\s*"type"\s*:\s*"progress"/.test(reply.text) || /^\s*\{\s*"type"\s*:\s*"result"/.test(reply.text)) {
+        if (status !== 200) throw new Error('Unexpected stream status');
+        const events = reply.text.trim().split('\n').map(line => JSON.parse(line));
+        const final = events.at(-1);
+        if (final?.type !== 'result' || events.slice(0, -1).some(e => e.type !== 'progress') || !Number.isInteger(final.status) || !final.data) throw new Error('Incomplete stream');
+        receiveProgress(reply.text);
+        status = final.status;
+        data = final.data;
+      } else data = JSON.parse(reply.text);
+    } catch { throw new Error('The local bridge returned an incomplete or unreadable response.'); }
+    if (status !== 200) {
       const cause = typeof data?.error === 'string' ? data.error.slice(0, 500) : 'Check the bridge configuration.';
-      throw new Error('AI request failed (' + reply.status + '). ' + cause);
+      throw new Error('AI request failed (' + status + '). ' + cause);
     }
     const result = checkResult(data, body.paper);
     try {

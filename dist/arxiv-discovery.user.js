@@ -1025,7 +1025,7 @@ const DEFAULT_SETTINGS = {
   history: {mode: 'all', days: 30, start: '', end: ''}, resetAt: null, noSpoilers: true,
   paperSpoilers: {}, theme: 'auto', showTools: true,
   ai: {enabled: false, url: 'http://127.0.0.1:4317', provider: 'local', token: '', model: '', consent: false,
-    dailyRequests: 10, maxInputChars: 100000, maxOutputTokens: 1600, dailyBudget: 1, inputPerMillion: 0, outputPerMillion: 0}
+    dailyRequests: 10, maxInputChars: 100000, maxOutputTokens: 1600, dailyBudget: 1, inputPerMillion: 0, outputPerMillion: 0, profile: 'quick', timeoutSeconds: 420}
 };
 
 const MODES = ['random', 'balanced', 'personalized', 'discovery', 'subscriptions', 'original'];
@@ -1217,6 +1217,8 @@ function mergedSettings(raw = {}, portable = false) {
   check(!token || /^[a-zA-Z0-9_-]{32,256}$/.test(token), 'bridge pairing token');
   result.ai = {url: bridge.origin, provider: choice(a.provider, ['local', 'openai'], 'AI provider'), model, token,
     enabled: portable ? false : bool(a.enabled, 'AI enabled flag'), consent: portable ? false : bool(a.consent, 'AI consent'),
+    profile: choice(a.profile, ['quick', 'full'], 'AI reading profile'),
+    timeoutSeconds: number(a.timeoutSeconds, 'AI request timeout', 60, 600, true),
     dailyRequests: number(a.dailyRequests, 'daily request limit', 0, 10000, true),
     maxInputChars: number(a.maxInputChars, 'source character limit', 256, 120000, true),
     maxOutputTokens: number(a.maxOutputTokens, 'output token limit', 64, 8192, true),
@@ -2340,12 +2342,14 @@ class DiscoveryApp {
     body.append(element('h3',{},'Optional AI explanations'),element('p',{class:'notice'},'AI runs only when requested. The paired local bridge retrieves this paper and sends source text, your explicit knowledge profile, the selected term or follow-up, and its surrounding explanation context to the chosen provider. Interest feedback, bookmarks, subscriptions, and browsing history are not sent. Provider keys belong in the bridge environment, never here.'));
     const provider=select([['local','Local OpenAI-compatible model'],['openai','Hosted OpenAI API']],a.provider||'local');
     const url=element('input',{type:'url',value:a.url});const model=element('input',{type:'text',value:a.model,placeholder:'Model allowed by your bridge'});
+    const profile=select([['quick','Quick (local; abstract first)'],['full','Detailed (full-paper excerpts)']],a.profile||'quick');
+    const timeout=element('input',{type:'number',min:60,max:600,value:a.timeoutSeconds||420});
     const requests=element('input',{type:'number',min:1,max:500,value:a.dailyRequests});const budget=element('input',{type:'number',min:0,max:1000,step:.1,value:a.dailyBudget});
     const chars=element('input',{type:'number',min:1000,max:120000,value:a.maxInputChars});const output=element('input',{type:'number',min:128,max:8192,value:a.maxOutputTokens});
     const inputRate=element('input',{type:'number',min:0,step:.01,value:a.inputPerMillion});const outputRate=element('input',{type:'number',min:0,step:.01,value:a.outputPerMillion});
     const enabled=element('input',{type:'checkbox',checked:a.enabled});const consent=element('input',{type:'checkbox',checked:a.consent});
     for(const input of [provider,url,model])input.addEventListener('input',()=>{consent.checked=false;enabled.checked=false;});
-    body.append(element('div',{class:'columns'},field('Provider',provider),field('Local bridge URL',url,'Only http://127.0.0.1 with an optional port is allowed.'),field('Model',model),field('Daily request limit',requests),field('Daily estimated budget (USD)',budget),field('Maximum source characters',chars),field('Maximum output tokens',output),field('Input USD per million tokens (estimate)',inputRate),field('Output USD per million tokens (estimate)',outputRate)),
+    body.append(element('div',{class:'columns'},field('Provider',provider),field('Local bridge URL',url,'Only http://127.0.0.1 with an optional port is allowed.'),field('Model',model),field('Local reading profile',profile,'Quick caps source at 4,000 characters and output at 768 tokens; protected readings still use the protection filter. Hosted AI uses Detailed.'),field('Request timeout (seconds)',timeout),field('Daily request limit',requests),field('Daily estimated budget (USD)',budget),field('Maximum source characters',chars),field('Maximum output tokens',output),field('Input USD per million tokens (estimate)',inputRate),field('Output USD per million tokens (estimate)',outputRate)),
       element('p',{class:'muted'},`Bridge pairing: ${a.token?'token stored privately':'not paired'}. The server enforces its own provider rates and ceilings; zero browser rates never bypass server budgets.`),this.button('Pair / replace bridge token',()=>this.pairBridge()),
       element('label',{class:'check'},enabled,'Enable on-demand AI'),element('label',{class:'check'},consent,'I authorize this selected provider to receive requested paper text and my explicit knowledge profile.'));
     const estimate=element('p',{class:'muted'});
@@ -2353,11 +2357,11 @@ class DiscoveryApp {
     for(const input of [chars,output,inputRate,outputRate])input.addEventListener('input',estimateCost);estimateCost();body.append(estimate);
     body.append(this.button('Save AI settings',async()=>{
       const u=new URL(url.value);if(u.protocol!=='http:'||u.hostname!=='127.0.0.1'||u.username||u.password||!['','/'].includes(u.pathname)||u.search||u.hash)throw new Error('Use http://127.0.0.1:PORT without a path or credentials.');
-      const n=Number(requests.value),b=Number(budget.value),c=Number(chars.value),o=Number(output.value),ir=Number(inputRate.value),or=Number(outputRate.value);
-      if(!Number.isInteger(n)||n<1||n>500||!Number.isFinite(b)||b<0||!Number.isInteger(c)||c<1000||c>120000||!Number.isInteger(o)||o<128||o>8192||!Number.isFinite(ir)||ir<0||!Number.isFinite(or)||or<0)throw new Error('Use valid positive limits and nonnegative rates.');
+      const n=Number(requests.value),b=Number(budget.value),c=Number(chars.value),o=Number(output.value),ir=Number(inputRate.value),or=Number(outputRate.value),t=Number(timeout.value);
+      if(!Number.isInteger(t)||t<60||t>600||!Number.isInteger(n)||n<1||n>500||!Number.isFinite(b)||b<0||!Number.isInteger(c)||c<1000||c>120000||!Number.isInteger(o)||o<128||o>8192||!Number.isFinite(ir)||ir<0||!Number.isFinite(or)||or<0)throw new Error('Use valid positive limits and nonnegative rates.');
       if(enabled.checked&&(!consent.checked||!model.value.trim()||!this.state.settings.ai.token))throw new Error('Pair the bridge, specify a model, and authorize the provider before enabling AI.');
       const changed=provider.value!==(a.provider||'local')||u.origin!==a.url||model.value.trim()!==a.model;
-      this.state.settings=await this.store.settings({ai:{provider:provider.value,url:u.origin,model:model.value.trim(),enabled:enabled.checked,consent:consent.checked,dailyRequests:n,dailyBudget:b,maxInputChars:c,maxOutputTokens:o,inputPerMillion:ir,outputPerMillion:or}});
+      this.state.settings=await this.store.settings({ai:{provider:provider.value,url:u.origin,model:model.value.trim(),enabled:enabled.checked,consent:consent.checked,dailyRequests:n,dailyBudget:b,maxInputChars:c,maxOutputTokens:o,inputPerMillion:ir,outputPerMillion:or,profile:profile.value,timeoutSeconds:t}});
       this.notify(changed?'AI configuration saved with the selected provider authorization.':'AI settings saved.');
     }));
   }
@@ -2370,7 +2374,10 @@ class DiscoveryApp {
     }
     const loading=element('p',{role:'status'},'Retrieving the source and preparing a grounded explanation…');body.append(loading);
     try {
-      const config={...options,noSpoilers:this.noSpoilers(paper)};
+      const config={...options,noSpoilers:this.noSpoilers(paper),onProgress:(phase,chunks)=>{
+        if(!loading.isConnected)return;
+        loading.textContent=phase==='retrieving'?'Selecting source evidence…':phase==='validating'?'Verifying source quotations…':`Generating explanation locally${chunks?` (${chunks} response chunks received)`:''}…`;
+      }};
       const result=term?await this.ai.explain(paper,term,config):await this.ai.overview(paper,config);
       if(!body.isConnected)return;if(generation!==await this.store.generation()){loading.textContent='Saved data changed while this request was running. The answer was not added to the glossary.';return;}loading.remove();
       const source=element('div',{class:'source'},`${result.cached?'Cached · ':''}Source analyzed: ${result.source.kind.toUpperCase()} · `,link('Open analyzed source',result.source.url),element('p',{},result.source.note||''));
@@ -2383,6 +2390,7 @@ class DiscoveryApp {
         if(!await this.store.setIfGeneration('glossary',key,entry,generation))return;this.state.glossary[key]=entry;await this.rememberPaper(paper);
         body.append(field('My understanding',select([['unfamiliar','Unfamiliar'],['partial','Partially understood'],['understood','Understood']],entry.status,async e=>{entry.status=e.target.value;entry.updatedAt=isoNow();await this.store.set('glossary',key,entry);})));
       }
+      if(!term&&this.state.settings.ai.provider==='local'&&(this.state.settings.ai.profile||'quick')==='quick'&&options.profile!=='full'&&!options.question&&options.detail!=='rigorous')body.append(this.button('Detailed paper overview',()=>this.openAI(paper,'',{...options,profile:'full'})));
       const question=element('textarea',{maxlength:2000,placeholder:'Ask a follow-up about this paper or term.'});
       body.append(element('div',{class:'actions'},this.button('Simpler explanation',()=>this.openAI(paper,term,{detail:'simpler',context:result.text.slice(0,1600)})),this.button('More rigorous explanation',()=>this.openAI(paper,term,{detail:'rigorous',context:result.text.slice(0,1600)}))),field('Follow-up question',question),this.button('Ask follow-up',()=>{if(!question.value.trim())throw new Error('Enter a follow-up question.');return this.openAI(paper,term,{question:question.value.trim(),context:result.text.slice(0,1600)});}),element('p',{class:'muted'},'Highlight unfamiliar terms inside this explanation to explain them recursively. No Spoilers limits responses to definitions, established background, and research-question context.'));
     } catch(error) {loading.textContent=error.message||String(error);loading.className='notice error';body.append(this.button('Check AI settings',()=>this.openSettings()));}
@@ -2952,6 +2960,7 @@ return {generateSelection,replaceSelectionPaper};
 "src/ai.js": (__require) => {
 // Changing the grounding protocol or response policy must invalidate old explanations.
 const PROMPT_VERSION = 1;
+const CACHE_VERSION = 2;
 const ID_PATTERN = /^(?:\d{4}\.\d{4,5}|[a-z][a-z.-]*\/\d{7})$/i;
 const MODEL_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/;
 const LEVELS = new Set(['unfamiliar', 'introduced', 'developing', 'comfortable', 'proficient', 'advanced']);
@@ -3095,6 +3104,13 @@ class AIClient {
       throw new Error('A valid arXiv paper and version are required.');
     }
     const limits = requestLimits(ai);
+    const profile = provider === "local" ? (options.profile || (options.detail === "rigorous" || options.question ? "full" : ai.profile || "quick")) : "full";
+    if (!["quick", "full"].includes(profile)) throw new Error("Choose a supported AI reading profile.");
+    if (profile === "quick") {
+      limits.maxInputChars = Math.min(limits.maxInputChars, 4000);
+      limits.maxOutputTokens = Math.min(limits.maxOutputTokens, 768);
+    }
+    const timeout = numericSetting(ai.timeoutSeconds, 420, 60, 600, true) * 1000;
     const detail = DETAIL_VALUES.get(String(options.detail || 'standard').toLowerCase());
     if (!detail) throw new Error('Choose a standard, simpler, or rigorous explanation.');
     const question = boundedText(options.question, 2000, 'The follow-up question');
@@ -3110,9 +3126,9 @@ class AIClient {
     };
     const context = [metadata.title, metadata.abstract, term, question, readerContext].join(' ').toLowerCase();
     const knowledge = profileTopics(await this.getKnowledge(), context);
-    const prompt = { protocol: PROMPT_VERSION, provider, model: ai.model, action, paper: metadata,
+    const prompt = { protocol: PROMPT_VERSION, provider, model: ai.model, profile, action, paper: metadata,
       noSpoilers, detail, term, question, context: readerContext, knowledge };
-    const stamp = await fingerprint([origin, prompt, limits.maxInputChars, limits.maxOutputTokens]);
+    const stamp = await fingerprint([CACHE_VERSION, origin, prompt, limits.maxInputChars, limits.maxOutputTokens]);
     const key = 'ai:' + paper.id + ':v' + paper.version + ':' + stamp;
     if (generation !== await this.getGeneration()) throw new Error('Saved data changed while preparing this request. Please request the explanation again.');
     const saved = await this.cacheGet(key);
@@ -3127,27 +3143,50 @@ class AIClient {
       throw new Error('The configured daily AI allowance is zero.');
     }
     if (generation !== await this.getGeneration()) throw new Error('Saved data changed while preparing this request. Please request the explanation again.');
-    const work = this.send(origin, ai.token, { ...prompt, limits }, key, generation);
+    const work = this.send(origin, ai.token, { ...prompt, limits, progress: provider === "local" }, key, generation, timeout, options.onProgress);
     this.pending.set(pendingKey, work);
     try { return await work; } finally { this.pending.delete(pendingKey); }
   }
 
-  async send(origin, token, body, key, generation) {
+  async send(origin, token, body, key, generation, timeout, onProgress) {
     const endpoint = origin + '/v1/explain';
     let reply;
+    let consumed = 0;
+    const receiveProgress = text => {
+      if (typeof text !== "string" || typeof onProgress !== "function") return;
+      const lines = text.split("\n");
+      for (let i = consumed; i < lines.length - 1; i++) {
+        try {
+          const event = JSON.parse(lines[i]);
+          if (event.type === "progress" && ["retrieving", "generating", "validating"].includes(event.phase)) onProgress(event.phase, Number.isSafeInteger(event.chunks) && event.chunks >= 0 ? event.chunks : 0);
+        } catch { /* Ignore incomplete/non-stream progress; final response is validated below. */ }
+      }
+      consumed = Math.max(consumed, lines.length - 1);
+    };
     try {
       reply = await this.request(endpoint, { method: 'POST', headers: {
         'Content-Type': 'application/json', Authorization: 'Bearer ' + token
-      }, body: JSON.stringify(body), timeout: 225000, redirect: 'error' });
+      }, body: JSON.stringify(body), timeout, redirect: 'error', onProgress: receiveProgress });
     } catch {
       throw new Error('The local AI bridge did not respond. Check its address, pairing, and running process. Requests are never retried automatically.');
     }
     if (reply.finalUrl && reply.finalUrl !== endpoint) throw new Error('The local bridge returned a redirect.');
     let data;
-    try { data = JSON.parse(reply.text); } catch { throw new Error('The local bridge returned an unreadable response.'); }
-    if (reply.status !== 200) {
+    let status = reply.status;
+    try {
+      if (/^\s*\{\s*"type"\s*:\s*"progress"/.test(reply.text) || /^\s*\{\s*"type"\s*:\s*"result"/.test(reply.text)) {
+        if (status !== 200) throw new Error('Unexpected stream status');
+        const events = reply.text.trim().split('\n').map(line => JSON.parse(line));
+        const final = events.at(-1);
+        if (final?.type !== 'result' || events.slice(0, -1).some(e => e.type !== 'progress') || !Number.isInteger(final.status) || !final.data) throw new Error('Incomplete stream');
+        receiveProgress(reply.text);
+        status = final.status;
+        data = final.data;
+      } else data = JSON.parse(reply.text);
+    } catch { throw new Error('The local bridge returned an incomplete or unreadable response.'); }
+    if (status !== 200) {
       const cause = typeof data?.error === 'string' ? data.error.slice(0, 500) : 'Check the bridge configuration.';
-      throw new Error('AI request failed (' + reply.status + '). ' + cause);
+      throw new Error('AI request failed (' + status + '). ' + cause);
     }
     const result = checkResult(data, body.paper);
     try {
@@ -3447,6 +3486,7 @@ function gmRequest(url,options={}) {
     const done=fn=>value=>{clearTimeout(timer);fn(value);};
     handle=GM_xmlhttpRequest({url:u.href,method:options.method||'GET',headers:options.headers||{},data:options.body,
       timeout:options.timeout||45000,anonymous:true,redirect:'error',
+      onprogress:options.onProgress? r=>{try{options.onProgress(r.responseText);}catch{/* progress is optional */}}:undefined,
       onload:done(r=>{
         let final;try{final=new URL(r.finalUrl||u.href);}catch{return reject(new Error('Malformed response destination.'));}
         if(final.origin!==u.origin) return reject(new Error('Unexpected cross-origin redirect was rejected.'));

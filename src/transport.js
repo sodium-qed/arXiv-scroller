@@ -18,6 +18,7 @@ export function gmRequest(url,options={}) {
     const done=fn=>value=>{clearTimeout(timer);fn(value);};
     handle=GM_xmlhttpRequest({url:u.href,method:options.method||'GET',headers:options.headers||{},data:options.body,
       timeout:options.timeout||45000,anonymous:true,redirect:'error',
+      onprogress:options.onProgress? r=>{try{options.onProgress(r.responseText);}catch{/* progress is optional */}}:undefined,
       onload:done(r=>{
         let final;try{final=new URL(r.finalUrl||u.href);}catch{return reject(new Error('Malformed response destination.'));}
         if(final.origin!==u.origin) return reject(new Error('Unexpected cross-origin redirect was rejected.'));

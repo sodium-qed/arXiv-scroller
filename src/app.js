@@ -393,12 +393,14 @@ export class DiscoveryApp {
     body.append(element('h3',{},'Optional AI explanations'),element('p',{class:'notice'},'AI runs only when requested. The paired local bridge retrieves this paper and sends source text, your explicit knowledge profile, the selected term or follow-up, and its surrounding explanation context to the chosen provider. Interest feedback, bookmarks, subscriptions, and browsing history are not sent. Provider keys belong in the bridge environment, never here.'));
     const provider=select([['local','Local OpenAI-compatible model'],['openai','Hosted OpenAI API']],a.provider||'local');
     const url=element('input',{type:'url',value:a.url});const model=element('input',{type:'text',value:a.model,placeholder:'Model allowed by your bridge'});
+    const profile=select([['quick','Quick (local; abstract first)'],['full','Detailed (full-paper excerpts)']],a.profile||'quick');
+    const timeout=element('input',{type:'number',min:60,max:600,value:a.timeoutSeconds||420});
     const requests=element('input',{type:'number',min:1,max:500,value:a.dailyRequests});const budget=element('input',{type:'number',min:0,max:1000,step:.1,value:a.dailyBudget});
     const chars=element('input',{type:'number',min:1000,max:120000,value:a.maxInputChars});const output=element('input',{type:'number',min:128,max:8192,value:a.maxOutputTokens});
     const inputRate=element('input',{type:'number',min:0,step:.01,value:a.inputPerMillion});const outputRate=element('input',{type:'number',min:0,step:.01,value:a.outputPerMillion});
     const enabled=element('input',{type:'checkbox',checked:a.enabled});const consent=element('input',{type:'checkbox',checked:a.consent});
     for(const input of [provider,url,model])input.addEventListener('input',()=>{consent.checked=false;enabled.checked=false;});
-    body.append(element('div',{class:'columns'},field('Provider',provider),field('Local bridge URL',url,'Only http://127.0.0.1 with an optional port is allowed.'),field('Model',model),field('Daily request limit',requests),field('Daily estimated budget (USD)',budget),field('Maximum source characters',chars),field('Maximum output tokens',output),field('Input USD per million tokens (estimate)',inputRate),field('Output USD per million tokens (estimate)',outputRate)),
+    body.append(element('div',{class:'columns'},field('Provider',provider),field('Local bridge URL',url,'Only http://127.0.0.1 with an optional port is allowed.'),field('Model',model),field('Local reading profile',profile,'Quick caps source at 4,000 characters and output at 768 tokens; protected readings still use the protection filter. Hosted AI uses Detailed.'),field('Request timeout (seconds)',timeout),field('Daily request limit',requests),field('Daily estimated budget (USD)',budget),field('Maximum source characters',chars),field('Maximum output tokens',output),field('Input USD per million tokens (estimate)',inputRate),field('Output USD per million tokens (estimate)',outputRate)),
       element('p',{class:'muted'},`Bridge pairing: ${a.token?'token stored privately':'not paired'}. The server enforces its own provider rates and ceilings; zero browser rates never bypass server budgets.`),this.button('Pair / replace bridge token',()=>this.pairBridge()),
       element('label',{class:'check'},enabled,'Enable on-demand AI'),element('label',{class:'check'},consent,'I authorize this selected provider to receive requested paper text and my explicit knowledge profile.'));
     const estimate=element('p',{class:'muted'});
@@ -406,11 +408,11 @@ export class DiscoveryApp {
     for(const input of [chars,output,inputRate,outputRate])input.addEventListener('input',estimateCost);estimateCost();body.append(estimate);
     body.append(this.button('Save AI settings',async()=>{
       const u=new URL(url.value);if(u.protocol!=='http:'||u.hostname!=='127.0.0.1'||u.username||u.password||!['','/'].includes(u.pathname)||u.search||u.hash)throw new Error('Use http://127.0.0.1:PORT without a path or credentials.');
-      const n=Number(requests.value),b=Number(budget.value),c=Number(chars.value),o=Number(output.value),ir=Number(inputRate.value),or=Number(outputRate.value);
-      if(!Number.isInteger(n)||n<1||n>500||!Number.isFinite(b)||b<0||!Number.isInteger(c)||c<1000||c>120000||!Number.isInteger(o)||o<128||o>8192||!Number.isFinite(ir)||ir<0||!Number.isFinite(or)||or<0)throw new Error('Use valid positive limits and nonnegative rates.');
+      const n=Number(requests.value),b=Number(budget.value),c=Number(chars.value),o=Number(output.value),ir=Number(inputRate.value),or=Number(outputRate.value),t=Number(timeout.value);
+      if(!Number.isInteger(t)||t<60||t>600||!Number.isInteger(n)||n<1||n>500||!Number.isFinite(b)||b<0||!Number.isInteger(c)||c<1000||c>120000||!Number.isInteger(o)||o<128||o>8192||!Number.isFinite(ir)||ir<0||!Number.isFinite(or)||or<0)throw new Error('Use valid positive limits and nonnegative rates.');
       if(enabled.checked&&(!consent.checked||!model.value.trim()||!this.state.settings.ai.token))throw new Error('Pair the bridge, specify a model, and authorize the provider before enabling AI.');
       const changed=provider.value!==(a.provider||'local')||u.origin!==a.url||model.value.trim()!==a.model;
-      this.state.settings=await this.store.settings({ai:{provider:provider.value,url:u.origin,model:model.value.trim(),enabled:enabled.checked,consent:consent.checked,dailyRequests:n,dailyBudget:b,maxInputChars:c,maxOutputTokens:o,inputPerMillion:ir,outputPerMillion:or}});
+      this.state.settings=await this.store.settings({ai:{provider:provider.value,url:u.origin,model:model.value.trim(),enabled:enabled.checked,consent:consent.checked,dailyRequests:n,dailyBudget:b,maxInputChars:c,maxOutputTokens:o,inputPerMillion:ir,outputPerMillion:or,profile:profile.value,timeoutSeconds:t}});
       this.notify(changed?'AI configuration saved with the selected provider authorization.':'AI settings saved.');
     }));
   }
@@ -423,7 +425,10 @@ export class DiscoveryApp {
     }
     const loading=element('p',{role:'status'},'Retrieving the source and preparing a grounded explanation…');body.append(loading);
     try {
-      const config={...options,noSpoilers:this.noSpoilers(paper)};
+      const config={...options,noSpoilers:this.noSpoilers(paper),onProgress:(phase,chunks)=>{
+        if(!loading.isConnected)return;
+        loading.textContent=phase==='retrieving'?'Selecting source evidence…':phase==='validating'?'Verifying source quotations…':`Generating explanation locally${chunks?` (${chunks} response chunks received)`:''}…`;
+      }};
       const result=term?await this.ai.explain(paper,term,config):await this.ai.overview(paper,config);
       if(!body.isConnected)return;if(generation!==await this.store.generation()){loading.textContent='Saved data changed while this request was running. The answer was not added to the glossary.';return;}loading.remove();
       const source=element('div',{class:'source'},`${result.cached?'Cached · ':''}Source analyzed: ${result.source.kind.toUpperCase()} · `,link('Open analyzed source',result.source.url),element('p',{},result.source.note||''));
@@ -436,6 +441,7 @@ export class DiscoveryApp {
         if(!await this.store.setIfGeneration('glossary',key,entry,generation))return;this.state.glossary[key]=entry;await this.rememberPaper(paper);
         body.append(field('My understanding',select([['unfamiliar','Unfamiliar'],['partial','Partially understood'],['understood','Understood']],entry.status,async e=>{entry.status=e.target.value;entry.updatedAt=isoNow();await this.store.set('glossary',key,entry);})));
       }
+      if(!term&&this.state.settings.ai.provider==='local'&&(this.state.settings.ai.profile||'quick')==='quick'&&options.profile!=='full'&&!options.question&&options.detail!=='rigorous')body.append(this.button('Detailed paper overview',()=>this.openAI(paper,'',{...options,profile:'full'})));
       const question=element('textarea',{maxlength:2000,placeholder:'Ask a follow-up about this paper or term.'});
       body.append(element('div',{class:'actions'},this.button('Simpler explanation',()=>this.openAI(paper,term,{detail:'simpler',context:result.text.slice(0,1600)})),this.button('More rigorous explanation',()=>this.openAI(paper,term,{detail:'rigorous',context:result.text.slice(0,1600)}))),field('Follow-up question',question),this.button('Ask follow-up',()=>{if(!question.value.trim())throw new Error('Enter a follow-up question.');return this.openAI(paper,term,{question:question.value.trim(),context:result.text.slice(0,1600)});}),element('p',{class:'muted'},'Highlight unfamiliar terms inside this explanation to explain them recursively. No Spoilers limits responses to definitions, established background, and research-question context.'));
     } catch(error) {loading.textContent=error.message||String(error);loading.className='notice error';body.append(this.button('Check AI settings',()=>this.openSettings()));}

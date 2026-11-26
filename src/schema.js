@@ -10,7 +10,7 @@ export const DEFAULT_SETTINGS = {
   history: {mode: 'all', days: 30, start: '', end: ''}, resetAt: null, noSpoilers: true,
   paperSpoilers: {}, theme: 'auto', showTools: true,
   ai: {enabled: false, url: 'http://127.0.0.1:4317', provider: 'local', token: '', model: '', consent: false,
-    dailyRequests: 10, maxInputChars: 100000, maxOutputTokens: 1600, dailyBudget: 1, inputPerMillion: 0, outputPerMillion: 0}
+    dailyRequests: 10, maxInputChars: 100000, maxOutputTokens: 1600, dailyBudget: 1, inputPerMillion: 0, outputPerMillion: 0, profile: 'quick', timeoutSeconds: 420}
 };
 
 const MODES = ['random', 'balanced', 'personalized', 'discovery', 'subscriptions', 'original'];
@@ -202,6 +202,8 @@ export function mergedSettings(raw = {}, portable = false) {
   check(!token || /^[a-zA-Z0-9_-]{32,256}$/.test(token), 'bridge pairing token');
   result.ai = {url: bridge.origin, provider: choice(a.provider, ['local', 'openai'], 'AI provider'), model, token,
     enabled: portable ? false : bool(a.enabled, 'AI enabled flag'), consent: portable ? false : bool(a.consent, 'AI consent'),
+    profile: choice(a.profile, ['quick', 'full'], 'AI reading profile'),
+    timeoutSeconds: number(a.timeoutSeconds, 'AI request timeout', 60, 600, true),
     dailyRequests: number(a.dailyRequests, 'daily request limit', 0, 10000, true),
     maxInputChars: number(a.maxInputChars, 'source character limit', 256, 120000, true),
     maxOutputTokens: number(a.maxOutputTokens, 'output token limit', 64, 8192, true),

@@ -24,9 +24,21 @@ The userscript is the entire browser application. Mathematics rendering runs loc
 | Return to all papers | **Show all papers** clears the filter and keeps each entry's tools available. To hide the tools as well, turn off **Enable paper tools** in **Settings**. This preference persists across reloads. Reopen **Settings** to turn them back on. |
 | Remove all added controls | **Original arXiv** also removes the upper-right **Settings** button. Restore the add-on with **Show arXiv Discovery** in the Tampermonkey menu. |
 
-Pure Random and Balanced Exploration assign up to 32 distinct papers to the 32 mathematics categories. A category can have no eligible announcement or share its only eligible paper with another category. **Selection options** explains missing subjects. Personalized mode draws 1–32 papers. Subscriptions selects the eligible author matches in the announcement.
+Pure Random and Balanced Exploration calculate their daily size from the announcement. A category with `N` eligible papers receives `ceil(sqrt(N))` slots; an empty category receives zero. The target is the sum of these quotas across all 32 mathematics categories, with no fixed daily paper limit. A cross-listed paper can fill only one slot. The sampler first represents as many eligible categories as possible, then fills as many quota slots as possible.
+
+| Mode | Daily size | Which papers fill the slots |
+| --- | --- | --- |
+| Pure Random | Automatically calculated square-root quotas | Uniform random priorities within each category; ratings and author preferences are ignored. |
+| Balanced Exploration | The same square-root quotas | Existing interest-weighted priorities within each category, mixed with configurable random exploration (25% by default). Interests do not change quotas. |
+| Personalized | 50 by default; configurable from 1 to 200, limited by the eligible pool | One global weighted draw without replacement; no category quotas. With no preference signal, the global draw is uniform. |
+| Discovery | One slot per nonempty category | Existing novelty weights favor less familiar topics, categories and author labels. |
+| Subscriptions | All eligible matches | Existing confirmed author-subscription matching. |
+
+**Daily selection → Category distribution** shows each category's eligible count, calculated square-root quota, actual assigned count and any shortage reason. Discovery also shows its applied one-paper quota. The status reports the automatic target, selected count and any shortfall. Cross-list conflicts can make the full target impossible even when each category has enough candidates on its own; the same paper is never shown twice. **Why this paper?** explains the applied procedure without inventing inclusion probabilities. [Matching, examples and probability details](docs/RECOMMENDER.md#adaptive-category-quotas)
 
 Changing the mode in **Settings** updates an active daily selection immediately. On the full listing, the choice applies the next time you request a daily selection. Refreshing shows the full listing again. Reopening the selection uses the saved draw for the same archive, announcement and settings. New feedback influences the next generation.
+
+Upgrading preserves existing selections, revisions, ratings and other user data. A saved draw keeps its original membership and explanations until you explicitly regenerate or replace a paper. Older draws without a saved distribution are identified as historical; their quotas are not reconstructed from current data. Existing Personalized size preferences are retained, while new or omitted settings default to 50. Existing JSON backups remain supported.
 
 Navigation uses **Alt+J** and **Alt+K**. On the current paper use **Alt+L** to like, **Alt+D** to dislike, **Alt+B** to toggle a bookmark and **Alt+R** to toggle its read mark.
 

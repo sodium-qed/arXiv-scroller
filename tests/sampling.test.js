@@ -19,20 +19,26 @@ const model = trainModel(ratings);
 const related = paper('new-a', ['math.CA'], {title: 'The arithmetic geometric mean inequality'});
 const unrelated = paper('new-b', ['math.CA'], {title: 'Long-time stability of ordinary differential equations'});
 
-test('cold category draws are seed-stable under page reordering and have equal first-choice probabilities', () => {
-  const papers = ['x', 'y', 'z'].map(id => paper(id, ['math.CO']));
+test('isolated adaptive draws are seed-stable and uniformly sample every quota-sized subset', () => {
+  const papers = ['w', 'x', 'y', 'z'].map(id => paper(id, ['math.CO']));
   assert.deepEqual(generateSelection(papers, options), generateSelection(papers.toReversed(), options));
   const counts = new Map(papers.map(p => [p.id, 0]));
+  const subsets = new Map();
   for (let seed = 0; seed < 2400; seed++) {
     const result = generateSelection(papers, {...options, seed});
-    assert.equal(result.entries.length, 1);
+    assert.equal(result.entries.length, 2);
     assert.equal(result.missing.length, 31);
-    const [entry] = result.entries;
-    assert.equal(entry.category, 'math.CO');
-    assert.equal(entry.probability, 1 / 3);
-    counts.set(entry.paperId, counts.get(entry.paperId) + 1);
+    const key = result.entries.map(entry => entry.paperId).sort().join(',');
+    subsets.set(key, (subsets.get(key) || 0) + 1);
+    for (const entry of result.entries) {
+      assert.equal(entry.category, 'math.CO');
+      assert.equal(entry.probability, 2 / 4);
+      counts.set(entry.paperId, counts.get(entry.paperId) + 1);
+    }
   }
-  for (const n of counts.values()) assert.ok(Math.abs(n - 800) < 95);
+  assert.equal(subsets.size, 6);
+  for (const n of subsets.values()) assert.ok(Math.abs(n - 400) < 75);
+  for (const n of counts.values()) assert.ok(Math.abs(n - 1200) < 100);
 });
 
 test('augmenting paths cover all possible categories, prevent duplicate paper IDs and omit joint marginals', () => {
@@ -45,10 +51,11 @@ test('augmenting paths cover all possible categories, prevent duplicate paper ID
   }
   const only = generateSelection([papers[0]], options);
   assert.equal(only.entries.length, 1);
-  assert.equal(only.missing.filter(m => m.reason.includes('maximum-coverage')).length, 2);
+  assert.equal(only.categoryDistribution.filter(row => row.quota > row.selectedCount).length, 2);
+  assert.equal(only.shortfall, 2);
 });
 
-test('the matcher reaches the true optimum on every 3-by-3 eligibility graph', () => {
+test('Discovery retains maximum one-per-category coverage on every 3-by-3 eligibility graph', () => {
   const codes = ['math.AC', 'math.AG', 'math.AP'];
   function optimum(papers, i = 0, taken = new Set()) {
     if (i === codes.length) return 0;
@@ -62,7 +69,7 @@ test('the matcher reaches the true optimum on every 3-by-3 eligibility graph', (
   }
   for (let mask = 0; mask < 512; mask++) {
     const papers = Array.from({length: 3}, (_, i) => paper(String(i), codes.filter((_, j) => (mask & (1 << (3 * i + j))) !== 0)));
-    const {entries} = generateSelection(papers, {...options, seed: mask});
+    const {entries} = generateSelection(papers, {...options, mode: 'discovery', seed: mask});
     assert.equal(entries.length, optimum(papers), 'graph ' + mask);
     assert.equal(entries.length, new Set(entries.map(entry => entry.paperId)).size);
     assert.equal(entries.length, new Set(entries.map(entry => entry.category)).size);
@@ -87,7 +94,8 @@ test('eligibility uses the listing date, distinct section settings, math aliases
 });
 
 test('Pure Random ignores profiles, subscriptions and exploration settings, and changes no state', () => {
-  const papers = [related, unrelated];
+  const papers = [{...related, authors: [{name: 'Followed'}]}, unrelated,
+    {...related, id: 'new-c'}, {...unrelated, id: 'new-d'}];
   const baseline = generateSelection(papers, options);
   const altered = {model, settings: {exploration: 0, useSubscriptions: true}, reading: {[related.id]: date},
     subscriptions: [{name: 'Followed', confirmedNameOnly: true}]};
@@ -103,19 +111,33 @@ test('Pure Random ignores profiles, subscriptions and exploration settings, and 
   assert.equal(model.sampleCount, 2);
 });
 
-test('Balanced Exploration mixes uniform and learned within-category draws with known probability in isolated categories', () => {
-  const papers = [related, unrelated];
+test('Balanced Exploration preserves its uniform/weighted mixture for multiple slots without claiming first-draw marginals', () => {
+  const papers = [related, unrelated, {...related, id: 'new-c'}, {...unrelated, id: 'new-d'}];
   const e = 0.3;
   const weights = new Map(papers.map(p => [p.id, Math.exp(5 * (predict(model, p) - 0.5))]));
   const sum = [...weights.values()].reduce((a, b) => a + b, 0);
-  let preferred = 0;
-  for (let seed = 0; seed < 600; seed++) {
+  const counts = new Map(papers.map(p => [p.id, 0]));
+  // For two weighted draws, enumerate the two mutually exclusive ways a paper
+  // can enter: first, or second after each other possible first paper.
+  const expected = new Map(papers.map(p => {
+    const first = weights.get(p.id) / sum;
+    const second = papers.filter(other => other.id !== p.id).reduce((total, other) =>
+      total + weights.get(other.id) / sum * weights.get(p.id) / (sum - weights.get(other.id)), 0);
+    return [p.id, e * 2 / papers.length + (1 - e) * (first + second)];
+  }));
+  const trials = 3000;
+  for (let seed = 0; seed < trials; seed++) {
     const selection = generateSelection(papers, {...options, mode: 'balanced', model, seed, settings: {exploration: e}});
-    const [entry] = selection.entries;
-    assert.ok(Math.abs(entry.probability - (e / papers.length + (1 - e) * weights.get(entry.paperId) / sum)) < 1e-12);
-    if (entry.paperId === related.id) preferred++;
+    assert.equal(selection.entries.length, 2);
+    for (const entry of selection.entries) {
+      assert.equal(entry.probability, null);
+      counts.set(entry.paperId, counts.get(entry.paperId) + 1);
+    }
   }
-  assert.ok(preferred > 360 && preferred < 570);
+  for (const p of papers) assert.ok(Math.abs(counts.get(p.id) / trials - expected.get(p.id)) < 0.04, p.id);
+  assert.ok(counts.get(related.id) > counts.get(unrelated.id));
+  assert.deepEqual(generateSelection(papers, {...options, mode: 'balanced', model}),
+    generateSelection(papers, {...options, mode: 'balanced', model, settings: {exploration: 0.25}}));
 });
 
 test('Personalized respects its finite count with or without a model, including several entries from one category', () => {
@@ -131,7 +153,7 @@ test('Personalized respects its finite count with or without a model, including 
   const all = generateSelection(papers, {...base, model, settings: {personalizedCount: 32}});
   assert.ok(all.entries.every(e => e.probability === 1));
   const large = Array.from({length: 50}, (_, i) => paper(String(i), ['math.CA']));
-  assert.equal(generateSelection(large, {...base, settings: {personalizedCount: 200}}).entries.length, 32);
+  assert.equal(generateSelection(large, {...base, settings: {personalizedCount: 200}}).entries.length, 50);
 });
 
 test('Discovery favors unseen topics and author labels without interpreting reading as ordinary preference', () => {
@@ -149,7 +171,9 @@ test('Discovery favors unseen topics and author labels without interpreting read
   }
   assert.ok(firstSeen > 300);
   const withoutHistory = generateSelection(papers, {...options, mode: 'discovery'});
-  assert.deepEqual(withoutHistory.entries.map(e => [e.paperId, e.probability]), generateSelection(papers, options).entries.map(e => [e.paperId, e.probability]));
+  assert.equal(withoutHistory.entries.length, 1);
+  assert.equal(withoutHistory.entries[0].probability, 1 / 2);
+  assert.equal(withoutHistory.categoryDistribution.find(row => row.category === 'math.CA').quota, 1);
   assert.deepEqual(generateSelection(papers, {...options, ...history}), generateSelection(papers, options));
 });
 
@@ -170,24 +194,38 @@ test('Subscriptions shows only confirmed matches; optional subscription weightin
   assert.match(identityFree.entries[0].reason, /confirmed name-only/);
   const optIn = {settings: {useSubscriptions: true, exploration: 0}, subscriptions};
   const [weighted] = generateSelection(papers, {...options, mode: 'balanced', ...optIn}).entries;
-  assert.equal(weighted.probability, weighted.paperId === a.id ? 0.5 : 0.25);
+  assert.equal(weighted.probability, null);
+  let followed = 0;
+  for (let seed = 0; seed < 1200; seed++) {
+    if (generateSelection(papers, {...options, mode: 'balanced', ...optIn, seed}).entries.some(entry => entry.paperId === a.id)) followed++;
+  }
+  // Two weighted draws with weights 2:1:1 include the followed author with
+  // probability 1/2 + 1/4*(2/3) + 1/4*(2/3) = 5/6.
+  assert.ok(Math.abs(followed - 1000) < 65);
   assert.deepEqual(generateSelection(papers, {...options, ...optIn}), generateSelection(papers, options));
   const [off] = generateSelection(papers, {...options, mode: 'balanced', subscriptions}).entries;
-  assert.equal(off.probability, 1 / 3);
+  assert.equal(off.probability, 2 / 3);
   const dashboard = analytics({events: [], settings: {}, papers: Object.fromEntries(papers.map(p => [p.id, p])), subscriptions, reading: {[a.id]: date}});
   assert.deepEqual(dashboard.followedResearchers[0].recent.map(p => p.id), [a.id]);
   assert.equal(dashboard.followedResearchers[0].unread.length, 0);
 });
 
 test('replacement retains other papers, reports a genuine single-draw probability, and preserves the source selection', () => {
-  const papers = ['a', 'b', 'c'].map(id => paper(id, ['math.PR'])).concat(paper('d', ['math.LO']));
+  const papers = ['a', 'b', 'c', 'e'].map(id => paper(id, ['math.PR'])).concat(paper('d', ['math.LO']));
   const original = generateSelection(papers, options);
+  const snapshot = structuredClone(original);
   const target = original.entries.find(e => e.category === 'math.PR');
   const replacement = replaceSelectionPaper(original, target.paperId, papers, {...options, seed: 'replacement'});
-  assert.equal(replacement.entries.length, 2);
-  assert.equal(replacement.entries.find(e => e.category === 'math.PR').probability, 0.5);
+  assert.equal(replacement.entries.length, 3);
+  const added = replacement.entries.find(entry => !original.entries.some(old => old.paperId === entry.paperId));
+  assert.equal(added.probability, 0.5);
+  assert.equal(added.category, 'math.PR');
   assert.ok(!replacement.entries.some(e => e.paperId === target.paperId));
-  assert.deepEqual(replacement.entries.find(e => e.paperId === 'd'), original.entries.find(e => e.paperId === 'd'));
+  for (const entry of original.entries.filter(e => e.paperId !== target.paperId)) {
+    assert.deepEqual(replacement.entries.find(e => e.paperId === entry.paperId), entry);
+  }
+  assert.deepEqual(replacement.categoryDistribution, original.categoryDistribution);
+  assert.deepEqual(original, snapshot);
   assert.ok(original.entries.some(e => e.paperId === target.paperId));
   assert.equal(replaceSelectionPaper(original, 'd', papers, options), null);
   assert.equal(replaceSelectionPaper(original, 'unknown', papers, options), null);

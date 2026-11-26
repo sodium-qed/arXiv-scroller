@@ -8,6 +8,7 @@ import gzip
 import hashlib
 import html
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -427,11 +428,21 @@ class UserscriptBrowserTests(unittest.TestCase):
         first.get_by_role("button", name="Daily selection", exact=True).click()
         self.await_mode("random")
         selected = self.paper_ids()
-        self.assertEqual(len(selected), 30)
+        snapshot = self.page.evaluate("""() => GM_listValues().filter(k=>k.includes(':selections:'))
+          .map(k=>GM_getValue(k)).find(r=>r.current.mode==='random').current""")
+        eligible = self.page.evaluate("""() => GM_listValues().filter(k=>k.includes(':papers:'))
+          .map(k=>GM_getValue(k)).filter(p=>p.section==='new')""")
+        counts = {r["category"]: sum(r["category"] in p["categories"] for p in eligible)
+                  for r in snapshot["categoryDistribution"]}
+        expected_target = sum(math.isqrt(n - 1) + 1 for n in counts.values() if n)
+        self.assertEqual(snapshot["targetSize"], expected_target)
+        self.assertEqual(snapshot["shortfall"], 0)
+        self.assertEqual(len(selected), expected_target)
+        self.assertGreater(len(selected), 32)
         self.assertEqual(len(selected), len(set(selected)))
         self.assertEqual(selected, [pid for pid in original if pid in selected])
         self.assertEqual(self.visible_rows.count(), self.page.locator('dl[id="articles"] > dt:visible').count())
-        expect(self.controls).to_contain_text("0 / 30")
+        expect(self.controls).to_contain_text(f"0 / {expected_target}")
         expect(self.page.locator("dialog[open], article.card")).to_have_count(0)
         self.assertTrue(self.page.evaluate("fixtureNativeUnchanged(true)"))
         self.controls.get_by_role("button", name="Show all papers", exact=True).click()
@@ -477,7 +488,7 @@ class UserscriptBrowserTests(unittest.TestCase):
         self.prepare()
         original = self.paper_ids()
         self.daily()
-        expect(self.visible_rows).to_have_count(3)
+        expect(self.visible_rows).to_have_count(6)
         panel = self.open_page_settings()
         toggle = panel.get_by_label("Enable paper tools")
         toggle.focus()
@@ -523,18 +534,21 @@ class UserscriptBrowserTests(unittest.TestCase):
         expect(self.visible_rows).to_have_count(0)
 
     def test_modes_replacement_restore_and_history_survive_refresh(self):
-        self.prepare()
+        # Three eligible papers per category leave one unused replacement after
+        # the adaptive quota of two is filled.
+        expanded = [*ROWS, row(7, "math.LO"), row(8, "math.GN"), row(9, "math.FA")]
+        self.prepare(listing(expanded))
         self.daily()
         initial = self.paper_ids()
-        self.assertEqual(len(set(initial)), 3)
-        self.assertEqual(self.visible_rows.count(), 3)
+        self.assertEqual(len(set(initial)), 6)
+        self.assertEqual(self.visible_rows.count(), 6)
         self.visible_rows.first.locator(".selection-note").get_by_role(
             "button", name="Replace this paper", exact=True).click()
         self.page.wait_for_function("""id => ![...document.querySelectorAll('dl[id="articles"] > dt')]
           .some(dt => dt.getClientRects().length &&
             dt.querySelector('a[title="Abstract"]').href.split('/').pop().replace(/v[0-9]+$/,'') === id)""", arg=initial[0])
         replacement = self.paper_ids()
-        self.assertEqual(len(set(replacement)), 3)
+        self.assertEqual(len(set(replacement)), 6)
         self.assertEqual(len(set(initial) ^ set(replacement)), 2)
         self.options().get_by_role("button", name="Restore original selection").click()
         self.page.wait_for_function("""expected => {
@@ -575,6 +589,121 @@ class UserscriptBrowserTests(unittest.TestCase):
         self.assertEqual(set(history_ids), set(initial))
         expect(panel.locator("article.card")).to_have_count(0)
         self.assertEqual(self.page.evaluate("fixtureGM.requests.length"), 0)
+
+    def test_adaptive_distribution_matches_uneven_categories_and_count_changes_keep_the_same_draw(self):
+        codes = ["math.LO"] * 9 + ["math.GN"] * 4 + ["math.FA"]
+        self.prepare(listing([row(i, code) for i, code in enumerate(codes, 1)]))
+        panel = self.open_page_settings()
+        expect(panel.get_by_label("Personalized selection size", exact=True)).to_have_value("50")
+        expect(panel.get_by_label("Balanced-mode random exploration (%)", exact=True)).to_have_value("25")
+        self.daily()
+        self.assertEqual(len(self.paper_ids()), 6)
+        pinned = self.paper_ids()
+        expect(self.controls).to_contain_text("Automatically calculated daily target: 6 papers · Selected: 6 · Shortfall: 0")
+        expect(self.controls).to_contain_text("3 of 3 eligible categories represented")
+        self.controls.get_by_text("Category distribution", exact=True).click()
+        rows = self.controls.locator(".category-distribution tbody tr")
+        expect(rows).to_have_count(32)
+        for code, expected in {"math.LO": ["9", "3", "3"], "math.GN": ["4", "2", "2"], "math.FA": ["1", "1", "1"]}.items():
+            data = self.controls.locator(f'.category-distribution tr[data-category="{code}"] td').all_text_contents()
+            self.assertEqual(data[:3], expected)
+            self.assertEqual(data[3], "Quota fulfilled.")
+        self.assertTrue(self.page.evaluate("fixtureNativeUnchanged(true)"))
+        before = self.page.evaluate("""() => GM_listValues().filter(k=>k.includes(':selections:'))
+          .map(k=>[k,GM_getValue(k)])""")
+        panel = self.open_page_settings()
+        panel.get_by_label("Personalized selection size", exact=True).fill("200")
+        panel.get_by_role("button", name="Save sampling settings", exact=True).click()
+        expect(panel).to_contain_text("Sampling settings saved")
+        self.daily()
+        self.assertEqual(self.paper_ids(), pinned)
+        after = self.page.evaluate("""() => GM_listValues().filter(k=>k.includes(':selections:'))
+          .map(k=>[k,GM_getValue(k)])""")
+        self.assertEqual(after, before)
+
+    def test_cross_list_shortfall_is_visible_and_distribution_table_stays_within_mobile_viewport(self):
+        overlap = [row(i, "math.LO").replace("Category (math.LO)</span>",
+                   "Category (math.LO)</span>; General Topology (math.GN); Functional Analysis (math.FA)")
+                   for i in (1, 2)]
+        self.prepare(listing(overlap))
+        self.daily()
+        self.assertEqual(len(self.paper_ids()), 2)
+        self.assertEqual(len(set(self.paper_ids())), 2)
+        expect(self.controls).to_contain_text("Automatically calculated daily target: 6 papers · Selected: 2 · Shortfall: 4")
+        expect(self.controls).to_contain_text("2 of 3 eligible categories represented")
+        expect(self.controls).to_contain_text("cross-listed papers cannot be selected twice")
+        self.controls.get_by_text("Category distribution", exact=True).click()
+        total = 0
+        for code in ("math.LO", "math.GN", "math.FA"):
+            values = self.controls.locator(f'.category-distribution tr[data-category="{code}"] td').all_text_contents()
+            self.assertEqual(values[:2], ["2", "2"])
+            total += int(values[2])
+            self.assertTrue(values[3])
+            self.assertNotEqual(values[3], "Quota fulfilled.")
+        self.assertEqual(total, 2)
+        self.page.set_viewport_size({"width": 390, "height": 844})
+        table = self.controls.locator(".category-distribution .table-wrap")
+        self.assertTrue(table.evaluate("node => node.scrollWidth > node.clientWidth"))
+        self.assertTrue(self.page.evaluate("document.documentElement.scrollWidth <= innerWidth"))
+        self.assertTrue(self.page.evaluate("fixtureNativeUnchanged(true)"))
+
+    def test_legacy_selection_stays_pinned_until_explicit_regeneration_and_original_remains_restorable(self):
+        self.prepare()
+        key = "2026-11-26|random|new|originals|32|math"
+        entries = [{"paperId": f"2611.{n:05}", "category": code, "reason": "Saved original draw.", "probability": 0.5}
+                   for n, code in ((1, "math.LO"), (3, "math.GN"), (5, "math.FA"))]
+        legacy = {"mode": "random", "date": DATE, "seed": "legacy-seed", "entries": entries, "missing": []}
+        saved = {"original": legacy, "current": legacy, "revisions": [], "createdAt": DATE + "T00:00:00Z"}
+        self.page.evaluate("([key,value]) => GM_setValue('arxiv-discovery:v1:selections:'+key,value)", [key, saved])
+        self.reload_and_mount()
+        self.daily()
+        self.assertEqual(self.paper_ids(), [e["paperId"] for e in entries])
+        expect(self.controls).to_contain_text("predates category-distribution snapshots")
+        expect(self.controls.locator(".category-distribution")).to_have_count(0)
+        panel = self.open_page_settings()
+        expect(panel.get_by_label("Personalized selection size", exact=True)).to_have_value("50")
+        panel.get_by_label("Personalized selection size", exact=True).fill("200")
+        panel.get_by_role("button", name="Save sampling settings", exact=True).click()
+        expect(panel).to_contain_text("Sampling settings saved")
+        self.daily()
+        self.assertEqual(self.paper_ids(), [e["paperId"] for e in entries])
+        record = self.page.evaluate("key => GM_getValue('arxiv-discovery:v1:selections:'+key)", key)
+        self.assertEqual(record, saved)
+        self.options().get_by_role("button", name="Regenerate daily selection", exact=True).click()
+        expect(self.visible_rows).to_have_count(6)
+        expect(self.controls).to_contain_text("Automatically calculated daily target: 6 papers")
+        updated = self.page.evaluate("key => GM_getValue('arxiv-discovery:v1:selections:'+key)", key)
+        self.assertEqual(updated["original"], legacy)
+        self.assertEqual(updated["revisions"], [legacy])
+        self.assertEqual(updated["current"]["samplingVersion"], 2)
+        self.options().get_by_role("button", name="Restore original selection", exact=True).click()
+        expect(self.visible_rows).to_have_count(3)
+        expect(self.controls).to_contain_text("predates category-distribution snapshots")
+        self.assertEqual(self.paper_ids(), [e["paperId"] for e in entries])
+
+    def test_personalized_settings_accept_1_to_200_and_default_to_50(self):
+        self.prepare(listing([row(i, "math.CA") for i in range(1, 206)]))
+        panel = self.open_page_settings()
+        expect(panel.get_by_label("Personalized selection size", exact=True)).to_have_value("50")
+        expect(panel.get_by_label("Personalized selection size", exact=True)).to_have_attribute("max", "200")
+        self.pick_mode(panel, "personalized")
+        panel.get_by_role("button", name="Show daily selection", exact=True).click()
+        self.await_mode("personalized")
+        expect(self.visible_rows).to_have_count(50)
+        expect(self.controls.locator(".category-distribution")).to_have_count(0)
+        for count in (200, 1):
+            panel = self.open_page_settings()
+            panel.get_by_label("Personalized selection size", exact=True).fill(str(count))
+            panel.get_by_role("button", name="Save sampling settings", exact=True).click()
+            expect(panel).to_contain_text("Sampling settings saved")
+            self.daily()
+            expect(self.visible_rows).to_have_count(count)
+            self.assertEqual(len(set(self.paper_ids())), count)
+        panel = self.open_page_settings()
+        panel.get_by_label("Personalized selection size", exact=True).fill("201")
+        panel.get_by_role("button", name="Save sampling settings", exact=True).click()
+        expect(panel).to_contain_text("Use 0–100% exploration and 1–200 papers")
+        self.assertEqual(self.page.evaluate("GM_getValue('arxiv-discovery:v1:settings').personalizedCount"), 1)
 
     def test_daily_keyboard_navigation_background_and_category_browsing(self):
         self.prepare()
@@ -621,7 +750,7 @@ class UserscriptBrowserTests(unittest.TestCase):
         expect(card.get_by_role("button", name="Dislike", exact=True)).to_have_attribute("aria-pressed", "true")
         card.get_by_role("button", name="Bookmark", exact=True).click()
         card.get_by_role("button", name="Mark as read", exact=True).click()
-        expect(self.controls).to_contain_text("1 / 3")
+        expect(self.controls).to_contain_text("1 / 6")
         panel = self.nav("Knowledge")
         panel.get_by_label("Topic", exact=True).fill("sequences")
         panel.get_by_label("Knowledge level").select_option("Advanced")
@@ -689,7 +818,7 @@ class UserscriptBrowserTests(unittest.TestCase):
             self.assertFalse(cleared[collection], collection)
 
         self.daily()
-        self.assertEqual(len(self.paper_ids()), 3)
+        self.assertEqual(len(self.paper_ids()), 6)
         self.menu("All")
         second.get_by_role("button", name="Bookmark", exact=True).click()
         expect(second.get_by_role("button", name="Bookmarked")).to_be_visible()

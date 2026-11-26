@@ -84,12 +84,12 @@ function optionsFor(papers, options) {
   const hasPreference = (mode === 'balanced' || mode === 'personalized') &&
     Boolean(options.model?.sampleCount || (useSubscriptions && pool.some(paper => matches(paper).length)));
   const exploration = Number(settings.exploration ?? 0.25);
-  const count = Number(settings.personalizedCount ?? 32);
+  const count = Number(settings.personalizedCount ?? 50);
   return {
     date, mode, seed, model: options.model, random: randomSource(seed), pool, byId, categories, byCategory,
     availableSections, matches, useSubscriptions, hasPreference, info: new Map(),
     exploration: Number.isFinite(exploration) ? Math.max(0, Math.min(1, exploration)) : 0.25,
-    count: Number.isFinite(count) ? Math.max(1, Math.min(32, Math.trunc(count))) : 32,
+    count: Number.isFinite(count) ? Math.max(1, Math.min(200, Math.trunc(count))) : 50,
     encounters: mode === 'discovery' ? encountered(options, byId) : null,
     incomplete: options.complete === false,
   };
@@ -176,24 +176,41 @@ function rankPool(items, ctx) {
   return {order, first, flat, exploreBranch, count: n};
 }
 
+function quotaDescription(category, ctx) {
+  if (!category || ctx.mode === 'discovery') return '';
+  const quota = ctx.quotaDetails?.get(category);
+  if (!quota) return '';
+  if (quota.legacy) return ' This replaces a slot in the saved selection; its existing category counts are preserved.';
+  return ' The category receives ceil(sqrt(' + quota.eligibleCount + ')) = ' + quota.quota +
+    ' slot(s). Matching first maximizes distinct category coverage, then fulfilled quota slots, using the ' +
+    'paper priorities to resolve choices. Each cross-listed paper fills only one slot.';
+}
+
 function describe(paper, category, ranking, ctx) {
   const where = category ? ' for ' + category : '';
+  const quota = quotaDescription(category, ctx);
   if (ctx.mode === 'random') {
     return 'Uniform random priorities' + where + ' among ' + ranking.count +
-      ' eligible paper(s). Cross-listed papers are assigned to maximize distinct category coverage.';
+      ' eligible paper(s), without interest or author preferences.' + quota;
   }
   if (ctx.mode === 'discovery') {
-    if (!ctx.encounters.ids.size) return 'First discovery draw' + where + '. All eligible papers received uniform priorities.';
+    if (!ctx.encounters.ids.size) return 'First discovery draw' + where +
+      '. All eligible papers received uniform priorities. Discovery reserves one slot per eligible category.';
     const info = paperInfo(paper, ctx);
     return 'Discovery draw' + where + ' weighted by prior topic, category and author encounters. ' +
       info.newTopics + ' of ' + info.totalTopics + ' topic labels and ' + info.newAuthors + ' of ' +
-      info.totalAuthors + ' author IDs or names were unseen.';
+      info.totalAuthors + ' author IDs or names were unseen. Discovery reserves one slot per eligible category.';
   }
-  if (!ctx.hasPreference) return 'Cold-start draw' + where + '. Eligible papers received uniform priorities.';
-  if (ctx.mode === 'balanced' && ranking.exploreBranch) return 'Uniform exploration draw' + where +
-    ' among ' + ranking.count + ' eligible paper(s). Cross-listed papers are assigned to maximize coverage.';
+  if (!ctx.hasPreference) return ctx.mode === 'personalized' ?
+    'Global cold-start draw: uniform sampling without replacement across all eligible papers, with no category quotas.' :
+    'Cold-start draw' + where + '. Eligible papers received uniform priorities.' + quota;
+  const exploration = ' The configured random exploration chance is ' +
+    Number((100 * ctx.exploration).toFixed(6)) + '% per category ordering; it does not change the quota.';
+  if (ctx.mode === 'balanced' && ranking.exploreBranch) return 'Uniform exploration ordering' + where +
+    ' among ' + ranking.count + ' eligible paper(s).' + exploration + quota;
   const info = paperInfo(paper, ctx);
-  let text = (ctx.mode === 'personalized' ? 'Personalized draw' : 'Within-category draw') + where + '.';
+  let text = (ctx.mode === 'personalized' ? 'Global interest-weighted draw without replacement, with no category quotas' :
+    'Interest-weighted ordering') + where + '.';
   if (ctx.model?.sampleCount) {
     text += ' Weights use a local model trained on ' + ctx.model.sampleCount + ' active rating(s).';
     const term = interestEvidence(ctx.model, paper);
@@ -201,31 +218,37 @@ function describe(paper, category, ranking, ctx) {
   }
   if (info.followed) text += ' A followed-author match also increased its weight.';
   if (ctx.model?.sampleCount > 0 && ctx.model.sampleCount < 10) text += ' The training sample is small.';
-  return text;
+  return text + (ctx.mode === 'balanced' ? exploration + quota : '');
 }
 
 function matchedEntry(paper, code, ranking, ctx, probability) {
   return {paperId: paper.id, category: code, reason: describe(paper, code, ranking, ctx), probability};
 }
 
-function augment(code, visited, rankings, byPaper, byCategory) {
+// Identical slots share one adjacency list. Traversing a category reroutes one
+// of its occupied slots; the caller then fills the vacated slot. Thus a successful
+// path adds one paper to the starting category and preserves all other counts.
+// A category need only be visited once in an augmenting-path search, so recursion
+// depth is bounded by the number of mathematical categories, not the paper count.
+function augment(code, visited, rankings, byPaper) {
+  if (visited.has(code)) return false;
+  visited.add(code);
   for (const paper of rankings.get(code).order) {
-    if (visited.has(paper.id)) continue;
-    visited.add(paper.id);
     const previous = byPaper.get(paper.id);
-    if (previous === undefined || augment(previous, visited, rankings, byPaper, byCategory)) {
+    if (previous === code) continue;
+    if (previous === undefined || augment(previous, visited, rankings, byPaper)) {
       byPaper.set(paper.id, code);
-      byCategory.set(code, paper);
       return true;
     }
   }
   return false;
 }
 
-function missingReason(code, ctx) {
+function missingReason(code, ctx, selectedCount = 0, quota = 1) {
   const candidates = ctx.byCategory.get(code);
-  if (candidates.length) return 'All ' + candidates.length +
-    ' eligible paper(s) represent other categories in this maximum-coverage matching.';
+  if (candidates.length) return 'Cross-list overlap: ' + selectedCount + ' of ' + quota +
+    ' slots filled. The remaining eligible papers are assigned to other categories in this ' +
+    'maximum-coverage, maximum-slot matching; no further slot can be filled without reusing a paper.';
   const sections = ctx.availableSections.get(code);
   const disabled = [];
   if (sections.has('cross')) disabled.push('cross-submissions');
@@ -236,57 +259,65 @@ function missingReason(code, ctx) {
 }
 
 function categorySelection(ctx) {
+  const adaptive = ctx.mode === 'random' || ctx.mode === 'balanced';
+  const quotas = new Map(CODES.map(code => {
+    const eligibleCount = ctx.byCategory.get(code).length;
+    const squareRootQuota = Math.ceil(Math.sqrt(eligibleCount));
+    return [code, {eligibleCount, squareRootQuota, quota: adaptive ? squareRootQuota : Number(eligibleCount > 0)}];
+  }));
+  ctx.quotaDetails = quotas;
   const rankings = new Map(CODES.map(code => [code, rankPool(ctx.byCategory.get(code), ctx)]));
   const order = shuffled(CODES.filter(code => rankings.get(code).count), ctx.random);
   const byPaper = new Map();
-  const byCategory = new Map();
-  for (const code of order) augment(code, new Set(), rankings, byPaper, byCategory);
+  // Phase 1 is maximum bipartite matching with one slot per nonempty category.
+  // Phase 2 inserts every additional slot. Augmentation preserves all previously
+  // matched slots, so maximum breadth is retained. Inductively, inserting a slot
+  // and seeking an augmenting path maintains maximum cardinality for all slots
+  // inserted so far. At completion both priorities are mathematically optimal.
+  for (const code of order) augment(code, new Set(), rankings, byPaper);
+  const largestQuota = Math.max(0, ...order.map(code => quotas.get(code).quota));
+  for (let slot = 1; slot < largestQuota; slot++) {
+    for (const code of order) if (slot < quotas.get(code).quota) augment(code, new Set(), rankings, byPaper);
+  }
   const entries = [];
-  for (const code of order) {
-    const paper = byCategory.get(code);
-    if (!paper) continue;
+  const categoryDistribution = [];
+  for (const code of CODES) {
     const ranking = rankings.get(code);
+    const assigned = ranking.order.filter(paper => byPaper.get(paper.id) === code);
+    const {eligibleCount, squareRootQuota, quota} = quotas.get(code);
+    const selectedCount = assigned.length;
+    const reason = !eligibleCount || selectedCount < quota ? missingReason(code, ctx, selectedCount, quota) : null;
+    categoryDistribution.push({category: code, eligibleCount, squareRootQuota, quota, selectedCount, reason});
+  }
+  // Keep the randomized category presentation order, with papers ordered by their
+  // category priorities. In an isolated category this is exactly a permutation's
+  // first q entries, not repeated single draws with incorrectly reused marginals.
+  for (const code of order) {
+    const ranking = rankings.get(code);
+    const assigned = ranking.order.filter(paper => byPaper.get(paper.id) === code);
     const isolated = ctx.byCategory.get(code).every(candidate => ctx.categories.get(candidate.id).length === 1);
-    // Matching changes the inclusion probabilities of overlapping candidates.
-    entries.push(matchedEntry(paper, code, ranking, ctx, isolated ? ranking.first.get(paper.id) : null));
-  }
-  const missing = CODES.filter(code => !byCategory.has(code)).map(category =>
-    ({category, reason: missingReason(category, ctx)}));
-  return {entries, missing};
-}
-
-function coldPersonalized(ctx, count) {
-  const base = categorySelection(ctx).entries;
-  const initialCount = base.length;
-  const assigned = new Set(base.map(entry => entry.paperId));
-  let entries;
-  if (count < initialCount) {
-    entries = shuffled(base, ctx.random).slice(0, count);
-  } else {
-    const extra = shuffled(ctx.pool.filter(paper => !assigned.has(paper.id)), ctx.random).slice(0, count - initialCount);
-    entries = [...base, ...extra.map(paper => ({paperId: paper.id, category: null, probability: null,
-      reason: 'Uniform cold-start draw from the remaining papers after the available categories were represented.'}))];
-  }
-  return entries.map(entry => {
-    let probability = null;
-    if (count === ctx.pool.length) {
-      probability = 1;
-    } else {
-      const [code, ...otherCodes] = ctx.categories.get(entry.paperId);
-      const candidates = ctx.byCategory.get(code);
-      if (!otherCodes.length && candidates.every(paper => ctx.categories.get(paper.id).length === 1)) {
-        const initial = 1 / candidates.length;
-        probability = count <= initialCount ? initial * count / initialCount :
-          initial + (1 - initial) * (count - initialCount) / (ctx.pool.length - initialCount);
+    for (const paper of assigned) {
+      let probability = null;
+      if (isolated) {
+        if (assigned.length === ranking.count) probability = 1;
+        else if (ranking.flat) probability = assigned.length / ranking.count;
+        else if (assigned.length === 1) probability = ranking.first.get(paper.id);
       }
+      // Cross-list matching and weighted multiple draws generally change the
+      // marginal inclusion probability; no first-draw proxy is reported for them.
+      entries.push(matchedEntry(paper, code, ranking, ctx, probability));
     }
-    return {...entry, probability};
-  });
+  }
+  const missing = categoryDistribution.filter(row => row.reason !== null)
+    .map(({category, reason}) => ({category, reason}));
+  const targetSize = categoryDistribution.reduce((sum, row) => sum + row.quota, 0);
+  return {entries, missing, samplingVersion: 2, targetSize, shortfall: targetSize - entries.length, categoryDistribution};
 }
 
 function personalized(ctx) {
   const count = Math.min(ctx.count, ctx.pool.length);
-  if (!ctx.hasPreference) return coldPersonalized(ctx, count);
+  // Cold start is the same global sampler with equal weights, not category-first
+  // sampling. This preserves the no-quota contract even before the first rating.
   const ranking = rankPool(ctx.pool, ctx);
   return ranking.order.slice(0, count).map(paper => {
     let probability = null;
@@ -317,24 +348,22 @@ export function generateSelection(papers, options = {}) {
 function crossListedReplacement(selection, paperId, target, ctx) {
   const rankings = new Map();
   const byPaper = new Map();
-  const byCategory = new Map();
   for (const entry of selection.entries) {
     if (!ctx.byCategory.has(entry.category)) return null;
     if (entry.paperId !== paperId) {
       const paper = ctx.byId.get(entry.paperId);
       if (!paper || !ctx.categories.get(paper.id).includes(entry.category)) return null;
       byPaper.set(paper.id, entry.category);
-      byCategory.set(entry.category, paper);
     }
   }
   const retained = new Set(byPaper.keys());
-  for (const {category} of selection.entries) {
+  for (const category of new Set(selection.entries.map(entry => entry.category))) {
     const ranking = rankPool(ctx.byCategory.get(category).filter(paper => paper.id !== paperId), ctx);
     // Prefer ending a path at an unused paper to unnecessary reassignment.
     ranking.order = [...ranking.order.filter(paper => !retained.has(paper.id)), ...ranking.order.filter(paper => retained.has(paper.id))];
     rankings.set(category, ranking);
   }
-  if (!augment(target.category, new Set(), rankings, byPaper, byCategory)) return null;
+  if (!augment(target.category, new Set(), rankings, byPaper)) return null;
   const added = [...byPaper.keys()].find(id => !retained.has(id));
   if (!added) return null;
   return selection.entries.map(entry => {
@@ -342,7 +371,7 @@ function crossListedReplacement(selection, paperId, target, ctx) {
     const code = byPaper.get(id);
     if (id === entry.paperId && code === entry.category) return entry;
     const updated = matchedEntry(ctx.byId.get(id), code, rankings.get(code), ctx, null);
-    return {...updated, reason: 'A cross-list reassignment preserved the represented categories. ' + updated.reason};
+    return {...updated, reason: 'A cross-list reassignment preserved every existing category count. ' + updated.reason};
   });
 }
 
@@ -353,6 +382,14 @@ export function replaceSelectionPaper(selection, paperId, papers, options = {}) 
     seed: options.seed ?? (String(selection.seed) + '|replace|' + paperId)});
   const selected = new Set(selection.entries.map(entry => entry.paperId));
   const quota = ['random', 'balanced', 'discovery'].includes(ctx.mode);
+  if (quota) {
+    // A replacement is an edit to the saved selection, never a quota migration or
+    // automatic historical redraw. Preserve both old and new selection counts.
+    ctx.quotaDetails = new Map((selection.categoryDistribution || []).map(row => [row.category, row]));
+    if (!ctx.quotaDetails.size) for (const entry of selection.entries) {
+      ctx.quotaDetails.set(entry.category, {legacy: true});
+    }
+  }
   const candidates = (quota ? ctx.byCategory.get(target.category) || [] : ctx.pool).filter(paper =>
     !selected.has(paper.id) && (ctx.mode !== 'subscriptions' || ctx.matches(paper).length));
   let entries;
@@ -362,6 +399,8 @@ export function replaceSelectionPaper(selection, paperId, papers, options = {}) 
     const entry = ctx.mode === 'subscriptions' ? followedEntry(paper, ctx) :
       matchedEntry(paper, quota ? target.category : null, ranking, ctx, ranking.first.get(paper.id));
     if (ctx.mode === 'subscriptions') entry.probability = 1 / candidates.length;
+    entry.reason = 'Replacement draw from ' + candidates.length + ' currently unselected eligible paper(s). ' +
+      'Any recorded probability is conditional on this replacement pool. ' + entry.reason;
     entries = selection.entries.map(old => old.paperId === paperId ? entry : old);
   } else if (quota) {
     entries = crossListedReplacement(selection, paperId, target, ctx);

@@ -294,7 +294,16 @@ export class DiscoveryApp {
   }
   selectionKey() {
     const s=this.state.settings;const archive=location.pathname.match(/^\/list\/([^/]+)\//)?.[1]||'math';
-    return `${this.listing.announcementDate}|${s.mode}|${s.includeCross?'cross':'new'}|${s.includeReplacements?'replacements':'originals'}|${s.personalizedCount}|${archive}`;
+    const prefix=`${this.listing.announcementDate}|${s.mode}|${s.includeCross?'cross':'new'}|${s.includeReplacements?'replacements':'originals'}`;
+    const numbered=`${prefix}|${s.personalizedCount}|${archive}`;
+    if(s.mode==='personalized')return numbered;
+    // Older versions included the Personalized size in every mode's key.
+    // Reuse those draws without rewriting them; future non-Personalized draws
+    // use a key independent of an unrelated setting and the new default size.
+    const automatic=`${prefix}|auto|${archive}`;
+    if(this.state.selections[numbered])return numbered;
+    if(this.state.selections[automatic])return automatic;
+    return Object.keys(this.state.selections).filter(key=>key.startsWith(prefix+'|')&&key.endsWith('|'+archive)&&key.split('|').length===6).sort()[0]||automatic;
   }
   selectionOptions() {const s=this.state.settings;return {mode:s.mode,seed:makeId(),date:this.listing?.announcementDate,complete:this.listing?.complete,settings:s,model:this.model,subscriptions:this.state.subscriptions,reading:this.state.reading,knownPapers:this.state.papers};}
   snapshotSelection(record) {record.paperSnapshots=record.paperSnapshots||{};for(const e of record.current.entries) if(this.state.papers[e.paperId]) record.paperSnapshots[e.paperId]=this.state.papers[e.paperId];}
@@ -324,6 +333,25 @@ export class DiscoveryApp {
     const entries=this.activeSelection.current.entries;
     const count=entries.filter(e=>{const event=this.latestFeedback.get(e.paperId);return this.state.reading[e.paperId]||event&&event.value!=='removed';}).length;
     this.progress.textContent=`${count} / ${entries.length} papers reviewed · ${entries.length} selected from ${this.listing.papers.length} entries · ${this.listing.announcementDate}`;
+  }
+  selectionDistribution(selection) {
+    if(!['random','balanced','discovery'].includes(selection.mode))return null;
+    const rows=selection.categoryDistribution;
+    if(!rows)return element('p',{class:'muted historical-selection'},'This saved selection predates category-distribution snapshots. Its original papers remain pinned; the current sampling rules apply only when a new selection is requested.');
+    const discovery=selection.mode==='discovery';
+    const eligible=rows.filter(row=>row.eligibleCount>0).length,represented=rows.filter(row=>row.selectedCount>0).length;
+    const summary=element('div',{class:'selection-distribution'},
+      element('p',{class:'quota-summary'},`Automatically calculated daily target: ${selection.targetSize} papers · Selected: ${selection.entries.length} · Shortfall: ${selection.shortfall}. ${represented} of ${eligible} eligible categories represented.`));
+    if(selection.shortfall)summary.append(element('p',{class:'notice'},`${selection.shortfall} category slot(s) could not be filled because cross-listed papers cannot be selected twice. This matching fills the maximum possible number of slots while preserving the widest possible category coverage.`));
+    const headings=['Mathematical category','Eligible papers (N)','Square-root quota (⌈√N⌉)',...(discovery?['Discovery quota']:[]),'Selected papers','Reason for unfulfilled quota'];
+    const table=element('table',{class:'tabular'},element('thead',{},element('tr',{},headings.map(label=>element('th',{scope:'col'},label)))),
+      element('tbody',{},rows.map(row=>element('tr',{'data-category':row.category},
+        element('th',{scope:'row'},`${row.category} — ${CATEGORIES[row.category]}`),element('td',{},row.eligibleCount),element('td',{},row.squareRootQuota),
+        discovery?element('td',{},row.quota):null,element('td',{},row.selectedCount),element('td',{},row.reason||'Quota fulfilled.')))));
+    summary.append(element('details',{class:'category-distribution'},element('summary',{},'Category distribution'),
+      element('p',{class:'muted'},discovery?'Discovery applies one slot per nonempty category; square-root quotas are shown for comparison.':'Pure Random and Balanced Exploration apply ⌈√N⌉ slots per category. Interests change paper priorities within a category, never its quota.'),
+      element('p',{class:'muted'},'Eligible counts include each paper in every matching category. Selected counts assign each cross-listed paper to one category, so the selected counts sum to the daily selection size.'),element('div',{class:'table-wrap',tabindex:'0','aria-label':'Category distribution table'},table)));
+    return summary;
   }
   showAllPapers() {
     ++this.viewEpoch;this.nativeListing?.restore();this.activeSelection=null;this.activeSelectionKey=null;this.listView=null;this.progress=null;
@@ -376,12 +404,13 @@ export class DiscoveryApp {
     this.listView='daily';this.nativeListing.apply(new Set(record.current.entries.map(e=>e.paperId)));
     this.progress=element('span',{class:'listing-status',role:'status','aria-live':'polite'});
     root.append(element('p',{class:'listing-summary'},this.progress,' · ',this.button('Show all papers',()=>this.showAllPapers())));this.updateProgress();
+    const distribution=this.selectionDistribution(record.current);if(distribution)root.append(distribution);
     const options=element('details',{class:'selection-options'},element('summary',{},'Selection options'));
     options.append(field('Recommendation mode',this.modePicker()),element('div',{class:'more-actions'},this.button('Regenerate daily selection',()=>this.openDaily(true)),
       this.button('Restore original selection',()=>this.saveSelectionRevision(record.original)),this.button('Previous selections',()=>this.openPrevious()),this.button('All papers in a category',()=>this.openCategory()),this.button('Settings',()=>this.openSettings())),
       element('p',{class:'muted'},`Eligibility: new submissions${this.state.settings.includeCross?', cross-submissions':''}${this.state.settings.includeReplacements?', replacements':''}. Saved choices stay pinned; opening the page itself always shows all native entries.`),
       element('p',{class:'muted'},'Alt+J / Alt+K next / previous · Alt+L like · Alt+D dislike · Alt+B bookmark · Alt+R read.'));
-    if(record.current.missing.length)options.append(element('details',{},element('summary',{},`${record.current.missing.length} categories not represented`),element('ul',{},record.current.missing.map(m=>element('li',{},`${m.category}: ${m.reason}`)))));
+    if(!record.current.categoryDistribution&&record.current.missing.length)options.append(element('details',{},element('summary',{},`${record.current.missing.length} categories not represented`),element('ul',{},record.current.missing.map(m=>element('li',{},`${m.category}: ${m.reason}`)))));
     root.append(options);
     if(!record.current.entries.length)root.append(element('p',{class:'inline-notice'},this.state.settings.mode==='subscriptions'?'No eligible papers match followed authors in this publication.':'No eligible papers can be selected in this publication.'));
     for(const {root:paperRoot} of this.paperTools.values())paperRoot.querySelector('.selection-note')?.remove();
@@ -422,8 +451,8 @@ export class DiscoveryApp {
     let content=element('div');
     const render=key=>{content.replaceChildren();const r=this.state.selections[key];content.append(element('p',{class:'muted'},`${r.current.date} · ${r.current.mode} · ${r.revisions.length} saved revisions`));
       const revisions=[['current','Current selection'],['original','First selection'],...r.revisions.map((_,i)=>[String(i),`Revision ${i+1}`])];
-      const papers=element('ul');const draw=value=>{const selection=value==='current'?r.current:value==='original'?r.original:r.revisions[Number(value)];papers.replaceChildren(...selection.entries.map(e=>{const p=r.paperSnapshots?.[e.paperId]||this.state.papers[e.paperId];return p?this.paperReference(p,e):element('li',{},`${e.paperId}: metadata unavailable`);}));};
-      content.append(field('Saved version',select(revisions,'current',e=>draw(e.target.value))),papers);draw('current');};
+      const papers=element('ul'),distribution=element('div');const draw=value=>{const selection=value==='current'?r.current:value==='original'?r.original:r.revisions[Number(value)];const summary=this.selectionDistribution(selection);distribution.replaceChildren(...(summary?[summary]:[]));papers.replaceChildren(...selection.entries.map(e=>{const p=r.paperSnapshots?.[e.paperId]||this.state.papers[e.paperId];return p?this.paperReference(p,e):element('li',{},`${e.paperId}: metadata unavailable`);}));};
+      content.append(field('Saved version',select(revisions,'current',e=>draw(e.target.value))),distribution,papers);draw('current');};
     body.append(field('Publication and mode',select(keys.map(k=>[k,k.replaceAll('|',' · ')]),keys[0],e=>render(e.target.value))),content);render(keys[0]);
   }
   openCategory(category=Object.keys(CATEGORIES)[0]) {
@@ -561,8 +590,9 @@ export class DiscoveryApp {
       checkbox('Use explicit author subscriptions as recommendation signals',s.useSubscriptions,async e=>{this.state.settings=await this.store.settings({useSubscriptions:e.target.checked});}),
       checkbox('No Spoilers by default',s.noSpoilers,async e=>{this.state.settings=await this.store.settings({noSpoilers:e.target.checked});this.refreshPaperSettings({authors:false});}),
       field('Add-on color theme',select([['auto','System'],['light','Light'],['dark','Dark']],s.theme,async e=>{this.state.settings=await this.store.settings({theme:e.target.value});this.updateStatus();}),'Applies only to added controls and panels.'));
-    const explore=element('input',{type:'number',min:0,max:100,step:5,value:Math.round(s.exploration*100)});const count=element('input',{type:'number',min:1,max:32,value:s.personalizedCount});
-    body.append(element('div',{class:'row'},field('Balanced-mode random exploration (%)',explore),field('Personalized selection size',count),this.button('Save sampling settings',async()=>{const x=Number(explore.value),n=Number(count.value);if(!Number.isFinite(x)||x<0||x>100||!Number.isInteger(n)||n<1||n>32)throw new Error('Use 0–100% exploration and 1–32 papers.');if(n!==this.state.settings.personalizedCount)this.showAllPapers();this.state.settings=await this.store.settings({exploration:x/100,personalizedCount:n});this.notify('Sampling settings saved. Existing daily selections remain pinned.');})));
+    const explore=element('input',{type:'number',min:0,max:100,step:5,value:Math.round(s.exploration*100)});const count=element('input',{type:'number',min:1,max:200,value:s.personalizedCount});
+    body.append(element('p',{class:'muted'},'Pure Random and Balanced Exploration automatically select ⌈√N⌉ papers per category, subject to cross-listing conflicts. Discovery keeps one paper per category. Personalized samples globally without category quotas; its default size is 50 papers.'),
+      element('div',{class:'row'},field('Balanced-mode random exploration (%)',explore,'Defaults to 25%. Applies to paper priorities within each category.'),field('Personalized selection size',count,'1–200 papers. Applies only to Personalized mode.'),this.button('Save sampling settings',async()=>{const x=Number(explore.value),n=Number(count.value);if(!Number.isFinite(x)||x<0||x>100||!Number.isInteger(n)||n<1||n>200)throw new Error('Use 0–100% exploration and 1–200 papers.');if(n!==this.state.settings.personalizedCount&&this.state.settings.mode==='personalized')this.showAllPapers();this.state.settings=await this.store.settings({exploration:x/100,personalizedCount:n});this.notify('Sampling settings saved. Existing daily selections remain pinned.');})));
     this.aiSettings(body);
     body.append(element('h3',{},'Backup and data controls'),element('p',{class:'muted'},'JSON backups include personal data and explanations but exclude the pairing token and AI consent. Import validates then merges; it does not delete unrelated records.'),
       element('div',{class:'row'},this.button('Export all data (JSON)',async()=>downloadText('arxiv-discovery-backup.json',JSON.stringify(await this.store.export(),null,2),'application/json')),
@@ -575,7 +605,7 @@ export class DiscoveryApp {
     const groups=[['events','Feedback'],['bookmarks','Bookmarks'],['reading','Reading history'],['subscriptions','Author subscriptions'],['knowledge','Knowledge profile'],['glossary','Glossary'],['explanations','Cached AI explanations'],['selections','Saved daily selections']];
     const category=select(groups,'events');body.append(field('Selective deletion',category),this.button('Delete selected data',async()=>{if(!confirm(`Permanently delete ${groups.find(g=>g[0]===category.value)[1].toLowerCase()}?`))return;await this.store.clearCollection(category.value);this.showAllPapers();this.clearInlineAI();await this.reload();this.openSettings();}),
       this.button('Delete all local data',async()=>{if(!confirm('Permanently delete all arXiv Discovery data, settings, pairing and cached explanations on this browser? Export a backup first if needed.'))return;await this.store.clearAll();await this.cache.clear();this.showAllPapers();this.clearInlineAI();await this.reload();this.syncPaperTools();this.openSettings();this.notify('All saved Discovery data has been deleted.');},{class:'danger'}),
-      element('p',{class:'version'},'arXiv Discovery 1.1.1 · Independent userscript · Thank you to arXiv for use of its open access interoperability.'),
+      element('p',{class:'version'},'arXiv Discovery 1.2.0 · Independent userscript · Thank you to arXiv for use of its open access interoperability.'),
       link('Source, documentation and issues','https://github.com/sodium-qed/arXiv-scroller'));
   }
   aiSettings(body) {

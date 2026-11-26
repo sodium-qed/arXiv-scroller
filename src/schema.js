@@ -6,7 +6,7 @@ export const SCHEMA_VERSION = 1;
 export const COLLECTIONS = ['events', 'papers', 'bookmarks', 'reading', 'subscriptions', 'knowledge', 'glossary', 'selections', 'explanations'];
 export const DEFAULT_SETTINGS = {
   mode: 'random', includeCross: false, includeReplacements: false, exploration: 0.25,
-  personalizedCount: 32, trainRandom: true, useSubscriptions: false,
+  personalizedCount: 50, trainRandom: true, useSubscriptions: false,
   history: {mode: 'all', days: 30, start: '', end: ''}, resetAt: null, noSpoilers: true,
   paperSpoilers: {}, theme: 'auto', showTools: true,
   ai: {enabled: false, url: 'http://127.0.0.1:4317', provider: 'local', token: '', model: '', consent: false,
@@ -183,7 +183,7 @@ export function mergedSettings(raw = {}, portable = false) {
   const a = {...DEFAULT_SETTINGS.ai, ...obj(s.ai, 'AI settings')};
   const result = {
     mode: choice(s.mode, MODES, 'recommendation mode'), exploration: number(s.exploration, 'exploration', 0, 1),
-    personalizedCount: number(s.personalizedCount, 'daily count', 1, 32, true),
+    personalizedCount: number(s.personalizedCount, 'daily count', 1, 200, true),
     theme: choice(s.theme, ['auto', 'light', 'dark'], 'theme'),
     history: {mode: choice(h.mode, ['all', 'none', 'lastDays', 'ignoreLastDays', 'before', 'after', 'excludeRange'], 'history mode'),
       days: number(h.days, 'training window days', 1, 36500, true), start: h.start === '' ? '' : date(h.start), end: h.end === '' ? '' : date(h.end)},
@@ -310,8 +310,8 @@ function selection(value, key) {
     const day = date(v.date);
     check(key.startsWith(day + '|' + mode + '|'), 'daily selection key');
     const seen = new Set();
-    const maximum = mode === 'subscriptions' ? MAX_RECORDS : mode === 'original' ? 0 : 32;
-    return {mode, date: day, seed: str(v.seed, 'selection seed', 1024),
+    const maximum = mode === 'original' ? 0 : mode === 'discovery' ? 32 : mode === 'personalized' ? 200 : MAX_RECORDS;
+    const result = {mode, date: day, seed: str(v.seed, 'selection seed', 1024),
       entries: list(v.entries, 'selected papers', maximum).map(e => {
         obj(e, 'selected paper');
         const paperId = pid(e.paperId);
@@ -323,6 +323,39 @@ function selection(value, key) {
         check(Object.hasOwn(CATEGORIES, m.category), 'missing mathematics category');
         return {category: m.category, reason: str(m.reason, 'missing category reason', 8000)};
       })};
+    // Metadata is an optional generation-time snapshot. Old revisions retain
+    // their original shape; loading or importing them never invents new quotas.
+    if (v.samplingVersion !== undefined) result.samplingVersion = choice(v.samplingVersion, [2], 'sampling version');
+    if (['categoryDistribution', 'targetSize', 'shortfall'].some(field => v[field] !== undefined)) {
+      check(result.samplingVersion === 2 && ['random', 'balanced', 'discovery'].includes(mode), 'category quota metadata');
+      const categories = new Set();
+      const assigned = new Map();
+      for (const entry of result.entries) {
+        check(Object.hasOwn(CATEGORIES, entry.category), 'assigned mathematics category');
+        assigned.set(entry.category, (assigned.get(entry.category) || 0) + 1);
+      }
+      result.categoryDistribution = list(v.categoryDistribution, 'category distribution', 32).map(raw => {
+        const row = obj(raw, 'category distribution row');
+        check(Object.hasOwn(CATEGORIES, row.category) && !categories.has(row.category), 'unique distribution category');
+        categories.add(row.category);
+        const eligibleCount = number(row.eligibleCount, 'eligible paper count', 0, MAX_RECORDS, true);
+        const squareRootQuota = number(row.squareRootQuota, 'square-root quota', 0, MAX_RECORDS, true);
+        check(squareRootQuota === Math.ceil(Math.sqrt(eligibleCount)), 'calculated square-root quota');
+        const quota = number(row.quota, 'applied category quota', 0, squareRootQuota, true);
+        check(quota === (mode === 'discovery' ? Number(eligibleCount > 0) : squareRootQuota), 'mode category quota');
+        const selectedCount = number(row.selectedCount, 'assigned category count', 0, quota, true);
+        check(selectedCount === (assigned.get(row.category) || 0), 'category count matches selected papers');
+        const reason = optional(row.reason, value => str(value, 'quota reason', 8000, true));
+        check(selectedCount === quota || reason !== null, 'unfulfilled quota explanation');
+        return {category:row.category, eligibleCount, squareRootQuota, quota, selectedCount, reason};
+      });
+      check(categories.size === Object.keys(CATEGORIES).length, 'complete category distribution');
+      result.targetSize = number(v.targetSize, 'calculated selection size', 0, MAX_RECORDS, true);
+      check(result.targetSize === result.categoryDistribution.reduce((sum, row) => sum + row.quota, 0), 'total category quota');
+      result.shortfall = number(v.shortfall, 'selection shortfall', 0, result.targetSize, true);
+      check(result.shortfall === result.targetSize - result.entries.length, 'quota shortfall total');
+    }
+    return result;
   }
   const result = {original: read(r.original), current: read(r.current),
     revisions: list(r.revisions, 'selection revisions').map(read), createdAt: timestamp(r.createdAt)};

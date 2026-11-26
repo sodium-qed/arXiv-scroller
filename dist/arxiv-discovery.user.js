@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         arXiv Discovery
 // @namespace    https://github.com/sodium-qed/arXiv-scroller
-// @version      1.1.1
+// @version      1.2.0
 // @description  A finite daily mathematics selection, reversible local recommendations, and optional paper explanations. Adds to arXiv without replacing its interface.
 // @author       sodium-qed
 // @homepageURL  https://github.com/sodium-qed/arXiv-scroller
@@ -1057,7 +1057,7 @@ const SCHEMA_VERSION = 1;
 const COLLECTIONS = ['events', 'papers', 'bookmarks', 'reading', 'subscriptions', 'knowledge', 'glossary', 'selections', 'explanations'];
 const DEFAULT_SETTINGS = {
   mode: 'random', includeCross: false, includeReplacements: false, exploration: 0.25,
-  personalizedCount: 32, trainRandom: true, useSubscriptions: false,
+  personalizedCount: 50, trainRandom: true, useSubscriptions: false,
   history: {mode: 'all', days: 30, start: '', end: ''}, resetAt: null, noSpoilers: true,
   paperSpoilers: {}, theme: 'auto', showTools: true,
   ai: {enabled: false, url: 'http://127.0.0.1:4317', provider: 'local', token: '', model: '', consent: false,
@@ -1234,7 +1234,7 @@ function mergedSettings(raw = {}, portable = false) {
   const a = {...DEFAULT_SETTINGS.ai, ...obj(s.ai, 'AI settings')};
   const result = {
     mode: choice(s.mode, MODES, 'recommendation mode'), exploration: number(s.exploration, 'exploration', 0, 1),
-    personalizedCount: number(s.personalizedCount, 'daily count', 1, 32, true),
+    personalizedCount: number(s.personalizedCount, 'daily count', 1, 200, true),
     theme: choice(s.theme, ['auto', 'light', 'dark'], 'theme'),
     history: {mode: choice(h.mode, ['all', 'none', 'lastDays', 'ignoreLastDays', 'before', 'after', 'excludeRange'], 'history mode'),
       days: number(h.days, 'training window days', 1, 36500, true), start: h.start === '' ? '' : date(h.start), end: h.end === '' ? '' : date(h.end)},
@@ -1361,8 +1361,8 @@ function selection(value, key) {
     const day = date(v.date);
     check(key.startsWith(day + '|' + mode + '|'), 'daily selection key');
     const seen = new Set();
-    const maximum = mode === 'subscriptions' ? MAX_RECORDS : mode === 'original' ? 0 : 32;
-    return {mode, date: day, seed: str(v.seed, 'selection seed', 1024),
+    const maximum = mode === 'original' ? 0 : mode === 'discovery' ? 32 : mode === 'personalized' ? 200 : MAX_RECORDS;
+    const result = {mode, date: day, seed: str(v.seed, 'selection seed', 1024),
       entries: list(v.entries, 'selected papers', maximum).map(e => {
         obj(e, 'selected paper');
         const paperId = pid(e.paperId);
@@ -1374,6 +1374,39 @@ function selection(value, key) {
         check(Object.hasOwn(CATEGORIES, m.category), 'missing mathematics category');
         return {category: m.category, reason: str(m.reason, 'missing category reason', 8000)};
       })};
+    // Metadata is an optional generation-time snapshot. Old revisions retain
+    // their original shape; loading or importing them never invents new quotas.
+    if (v.samplingVersion !== undefined) result.samplingVersion = choice(v.samplingVersion, [2], 'sampling version');
+    if (['categoryDistribution', 'targetSize', 'shortfall'].some(field => v[field] !== undefined)) {
+      check(result.samplingVersion === 2 && ['random', 'balanced', 'discovery'].includes(mode), 'category quota metadata');
+      const categories = new Set();
+      const assigned = new Map();
+      for (const entry of result.entries) {
+        check(Object.hasOwn(CATEGORIES, entry.category), 'assigned mathematics category');
+        assigned.set(entry.category, (assigned.get(entry.category) || 0) + 1);
+      }
+      result.categoryDistribution = list(v.categoryDistribution, 'category distribution', 32).map(raw => {
+        const row = obj(raw, 'category distribution row');
+        check(Object.hasOwn(CATEGORIES, row.category) && !categories.has(row.category), 'unique distribution category');
+        categories.add(row.category);
+        const eligibleCount = number(row.eligibleCount, 'eligible paper count', 0, MAX_RECORDS, true);
+        const squareRootQuota = number(row.squareRootQuota, 'square-root quota', 0, MAX_RECORDS, true);
+        check(squareRootQuota === Math.ceil(Math.sqrt(eligibleCount)), 'calculated square-root quota');
+        const quota = number(row.quota, 'applied category quota', 0, squareRootQuota, true);
+        check(quota === (mode === 'discovery' ? Number(eligibleCount > 0) : squareRootQuota), 'mode category quota');
+        const selectedCount = number(row.selectedCount, 'assigned category count', 0, quota, true);
+        check(selectedCount === (assigned.get(row.category) || 0), 'category count matches selected papers');
+        const reason = optional(row.reason, value => str(value, 'quota reason', 8000, true));
+        check(selectedCount === quota || reason !== null, 'unfulfilled quota explanation');
+        return {category:row.category, eligibleCount, squareRootQuota, quota, selectedCount, reason};
+      });
+      check(categories.size === Object.keys(CATEGORIES).length, 'complete category distribution');
+      result.targetSize = number(v.targetSize, 'calculated selection size', 0, MAX_RECORDS, true);
+      check(result.targetSize === result.categoryDistribution.reduce((sum, row) => sum + row.quota, 0), 'total category quota');
+      result.shortfall = number(v.shortfall, 'selection shortfall', 0, result.targetSize, true);
+      check(result.shortfall === result.targetSize - result.entries.length, 'quota shortfall total');
+    }
+    return result;
   }
   const result = {original: read(r.original), current: read(r.current),
     revisions: list(r.revisions, 'selection revisions').map(read), createdAt: timestamp(r.createdAt)};
@@ -2279,7 +2312,16 @@ class DiscoveryApp {
   }
   selectionKey() {
     const s=this.state.settings;const archive=location.pathname.match(/^\/list\/([^/]+)\//)?.[1]||'math';
-    return `${this.listing.announcementDate}|${s.mode}|${s.includeCross?'cross':'new'}|${s.includeReplacements?'replacements':'originals'}|${s.personalizedCount}|${archive}`;
+    const prefix=`${this.listing.announcementDate}|${s.mode}|${s.includeCross?'cross':'new'}|${s.includeReplacements?'replacements':'originals'}`;
+    const numbered=`${prefix}|${s.personalizedCount}|${archive}`;
+    if(s.mode==='personalized')return numbered;
+    // Older versions included the Personalized size in every mode's key.
+    // Reuse those draws without rewriting them; future non-Personalized draws
+    // use a key independent of an unrelated setting and the new default size.
+    const automatic=`${prefix}|auto|${archive}`;
+    if(this.state.selections[numbered])return numbered;
+    if(this.state.selections[automatic])return automatic;
+    return Object.keys(this.state.selections).filter(key=>key.startsWith(prefix+'|')&&key.endsWith('|'+archive)&&key.split('|').length===6).sort()[0]||automatic;
   }
   selectionOptions() {const s=this.state.settings;return {mode:s.mode,seed:makeId(),date:this.listing?.announcementDate,complete:this.listing?.complete,settings:s,model:this.model,subscriptions:this.state.subscriptions,reading:this.state.reading,knownPapers:this.state.papers};}
   snapshotSelection(record) {record.paperSnapshots=record.paperSnapshots||{};for(const e of record.current.entries) if(this.state.papers[e.paperId]) record.paperSnapshots[e.paperId]=this.state.papers[e.paperId];}
@@ -2309,6 +2351,25 @@ class DiscoveryApp {
     const entries=this.activeSelection.current.entries;
     const count=entries.filter(e=>{const event=this.latestFeedback.get(e.paperId);return this.state.reading[e.paperId]||event&&event.value!=='removed';}).length;
     this.progress.textContent=`${count} / ${entries.length} papers reviewed · ${entries.length} selected from ${this.listing.papers.length} entries · ${this.listing.announcementDate}`;
+  }
+  selectionDistribution(selection) {
+    if(!['random','balanced','discovery'].includes(selection.mode))return null;
+    const rows=selection.categoryDistribution;
+    if(!rows)return element('p',{class:'muted historical-selection'},'This saved selection predates category-distribution snapshots. Its original papers remain pinned; the current sampling rules apply only when a new selection is requested.');
+    const discovery=selection.mode==='discovery';
+    const eligible=rows.filter(row=>row.eligibleCount>0).length,represented=rows.filter(row=>row.selectedCount>0).length;
+    const summary=element('div',{class:'selection-distribution'},
+      element('p',{class:'quota-summary'},`Automatically calculated daily target: ${selection.targetSize} papers · Selected: ${selection.entries.length} · Shortfall: ${selection.shortfall}. ${represented} of ${eligible} eligible categories represented.`));
+    if(selection.shortfall)summary.append(element('p',{class:'notice'},`${selection.shortfall} category slot(s) could not be filled because cross-listed papers cannot be selected twice. This matching fills the maximum possible number of slots while preserving the widest possible category coverage.`));
+    const headings=['Mathematical category','Eligible papers (N)','Square-root quota (⌈√N⌉)',...(discovery?['Discovery quota']:[]),'Selected papers','Reason for unfulfilled quota'];
+    const table=element('table',{class:'tabular'},element('thead',{},element('tr',{},headings.map(label=>element('th',{scope:'col'},label)))),
+      element('tbody',{},rows.map(row=>element('tr',{'data-category':row.category},
+        element('th',{scope:'row'},`${row.category} — ${CATEGORIES[row.category]}`),element('td',{},row.eligibleCount),element('td',{},row.squareRootQuota),
+        discovery?element('td',{},row.quota):null,element('td',{},row.selectedCount),element('td',{},row.reason||'Quota fulfilled.')))));
+    summary.append(element('details',{class:'category-distribution'},element('summary',{},'Category distribution'),
+      element('p',{class:'muted'},discovery?'Discovery applies one slot per nonempty category; square-root quotas are shown for comparison.':'Pure Random and Balanced Exploration apply ⌈√N⌉ slots per category. Interests change paper priorities within a category, never its quota.'),
+      element('p',{class:'muted'},'Eligible counts include each paper in every matching category. Selected counts assign each cross-listed paper to one category, so the selected counts sum to the daily selection size.'),element('div',{class:'table-wrap',tabindex:'0','aria-label':'Category distribution table'},table)));
+    return summary;
   }
   showAllPapers() {
     ++this.viewEpoch;this.nativeListing?.restore();this.activeSelection=null;this.activeSelectionKey=null;this.listView=null;this.progress=null;
@@ -2361,12 +2422,13 @@ class DiscoveryApp {
     this.listView='daily';this.nativeListing.apply(new Set(record.current.entries.map(e=>e.paperId)));
     this.progress=element('span',{class:'listing-status',role:'status','aria-live':'polite'});
     root.append(element('p',{class:'listing-summary'},this.progress,' · ',this.button('Show all papers',()=>this.showAllPapers())));this.updateProgress();
+    const distribution=this.selectionDistribution(record.current);if(distribution)root.append(distribution);
     const options=element('details',{class:'selection-options'},element('summary',{},'Selection options'));
     options.append(field('Recommendation mode',this.modePicker()),element('div',{class:'more-actions'},this.button('Regenerate daily selection',()=>this.openDaily(true)),
       this.button('Restore original selection',()=>this.saveSelectionRevision(record.original)),this.button('Previous selections',()=>this.openPrevious()),this.button('All papers in a category',()=>this.openCategory()),this.button('Settings',()=>this.openSettings())),
       element('p',{class:'muted'},`Eligibility: new submissions${this.state.settings.includeCross?', cross-submissions':''}${this.state.settings.includeReplacements?', replacements':''}. Saved choices stay pinned; opening the page itself always shows all native entries.`),
       element('p',{class:'muted'},'Alt+J / Alt+K next / previous · Alt+L like · Alt+D dislike · Alt+B bookmark · Alt+R read.'));
-    if(record.current.missing.length)options.append(element('details',{},element('summary',{},`${record.current.missing.length} categories not represented`),element('ul',{},record.current.missing.map(m=>element('li',{},`${m.category}: ${m.reason}`)))));
+    if(!record.current.categoryDistribution&&record.current.missing.length)options.append(element('details',{},element('summary',{},`${record.current.missing.length} categories not represented`),element('ul',{},record.current.missing.map(m=>element('li',{},`${m.category}: ${m.reason}`)))));
     root.append(options);
     if(!record.current.entries.length)root.append(element('p',{class:'inline-notice'},this.state.settings.mode==='subscriptions'?'No eligible papers match followed authors in this publication.':'No eligible papers can be selected in this publication.'));
     for(const {root:paperRoot} of this.paperTools.values())paperRoot.querySelector('.selection-note')?.remove();
@@ -2407,8 +2469,8 @@ class DiscoveryApp {
     let content=element('div');
     const render=key=>{content.replaceChildren();const r=this.state.selections[key];content.append(element('p',{class:'muted'},`${r.current.date} · ${r.current.mode} · ${r.revisions.length} saved revisions`));
       const revisions=[['current','Current selection'],['original','First selection'],...r.revisions.map((_,i)=>[String(i),`Revision ${i+1}`])];
-      const papers=element('ul');const draw=value=>{const selection=value==='current'?r.current:value==='original'?r.original:r.revisions[Number(value)];papers.replaceChildren(...selection.entries.map(e=>{const p=r.paperSnapshots?.[e.paperId]||this.state.papers[e.paperId];return p?this.paperReference(p,e):element('li',{},`${e.paperId}: metadata unavailable`);}));};
-      content.append(field('Saved version',select(revisions,'current',e=>draw(e.target.value))),papers);draw('current');};
+      const papers=element('ul'),distribution=element('div');const draw=value=>{const selection=value==='current'?r.current:value==='original'?r.original:r.revisions[Number(value)];const summary=this.selectionDistribution(selection);distribution.replaceChildren(...(summary?[summary]:[]));papers.replaceChildren(...selection.entries.map(e=>{const p=r.paperSnapshots?.[e.paperId]||this.state.papers[e.paperId];return p?this.paperReference(p,e):element('li',{},`${e.paperId}: metadata unavailable`);}));};
+      content.append(field('Saved version',select(revisions,'current',e=>draw(e.target.value))),distribution,papers);draw('current');};
     body.append(field('Publication and mode',select(keys.map(k=>[k,k.replaceAll('|',' · ')]),keys[0],e=>render(e.target.value))),content);render(keys[0]);
   }
   openCategory(category=Object.keys(CATEGORIES)[0]) {
@@ -2546,8 +2608,9 @@ class DiscoveryApp {
       checkbox('Use explicit author subscriptions as recommendation signals',s.useSubscriptions,async e=>{this.state.settings=await this.store.settings({useSubscriptions:e.target.checked});}),
       checkbox('No Spoilers by default',s.noSpoilers,async e=>{this.state.settings=await this.store.settings({noSpoilers:e.target.checked});this.refreshPaperSettings({authors:false});}),
       field('Add-on color theme',select([['auto','System'],['light','Light'],['dark','Dark']],s.theme,async e=>{this.state.settings=await this.store.settings({theme:e.target.value});this.updateStatus();}),'Applies only to added controls and panels.'));
-    const explore=element('input',{type:'number',min:0,max:100,step:5,value:Math.round(s.exploration*100)});const count=element('input',{type:'number',min:1,max:32,value:s.personalizedCount});
-    body.append(element('div',{class:'row'},field('Balanced-mode random exploration (%)',explore),field('Personalized selection size',count),this.button('Save sampling settings',async()=>{const x=Number(explore.value),n=Number(count.value);if(!Number.isFinite(x)||x<0||x>100||!Number.isInteger(n)||n<1||n>32)throw new Error('Use 0–100% exploration and 1–32 papers.');if(n!==this.state.settings.personalizedCount)this.showAllPapers();this.state.settings=await this.store.settings({exploration:x/100,personalizedCount:n});this.notify('Sampling settings saved. Existing daily selections remain pinned.');})));
+    const explore=element('input',{type:'number',min:0,max:100,step:5,value:Math.round(s.exploration*100)});const count=element('input',{type:'number',min:1,max:200,value:s.personalizedCount});
+    body.append(element('p',{class:'muted'},'Pure Random and Balanced Exploration automatically select ⌈√N⌉ papers per category, subject to cross-listing conflicts. Discovery keeps one paper per category. Personalized samples globally without category quotas; its default size is 50 papers.'),
+      element('div',{class:'row'},field('Balanced-mode random exploration (%)',explore,'Defaults to 25%. Applies to paper priorities within each category.'),field('Personalized selection size',count,'1–200 papers. Applies only to Personalized mode.'),this.button('Save sampling settings',async()=>{const x=Number(explore.value),n=Number(count.value);if(!Number.isFinite(x)||x<0||x>100||!Number.isInteger(n)||n<1||n>200)throw new Error('Use 0–100% exploration and 1–200 papers.');if(n!==this.state.settings.personalizedCount&&this.state.settings.mode==='personalized')this.showAllPapers();this.state.settings=await this.store.settings({exploration:x/100,personalizedCount:n});this.notify('Sampling settings saved. Existing daily selections remain pinned.');})));
     this.aiSettings(body);
     body.append(element('h3',{},'Backup and data controls'),element('p',{class:'muted'},'JSON backups include personal data and explanations but exclude the pairing token and AI consent. Import validates then merges; it does not delete unrelated records.'),
       element('div',{class:'row'},this.button('Export all data (JSON)',async()=>downloadText('arxiv-discovery-backup.json',JSON.stringify(await this.store.export(),null,2),'application/json')),
@@ -2560,7 +2623,7 @@ class DiscoveryApp {
     const groups=[['events','Feedback'],['bookmarks','Bookmarks'],['reading','Reading history'],['subscriptions','Author subscriptions'],['knowledge','Knowledge profile'],['glossary','Glossary'],['explanations','Cached AI explanations'],['selections','Saved daily selections']];
     const category=select(groups,'events');body.append(field('Selective deletion',category),this.button('Delete selected data',async()=>{if(!confirm(`Permanently delete ${groups.find(g=>g[0]===category.value)[1].toLowerCase()}?`))return;await this.store.clearCollection(category.value);this.showAllPapers();this.clearInlineAI();await this.reload();this.openSettings();}),
       this.button('Delete all local data',async()=>{if(!confirm('Permanently delete all arXiv Discovery data, settings, pairing and cached explanations on this browser? Export a backup first if needed.'))return;await this.store.clearAll();await this.cache.clear();this.showAllPapers();this.clearInlineAI();await this.reload();this.syncPaperTools();this.openSettings();this.notify('All saved Discovery data has been deleted.');},{class:'danger'}),
-      element('p',{class:'version'},'arXiv Discovery 1.1.1 · Independent userscript · Thank you to arXiv for use of its open access interoperability.'),
+      element('p',{class:'version'},'arXiv Discovery 1.2.0 · Independent userscript · Thank you to arXiv for use of its open access interoperability.'),
       link('Source, documentation and issues','https://github.com/sodium-qed/arXiv-scroller'));
   }
   aiSettings(body) {
@@ -2843,12 +2906,12 @@ function optionsFor(papers, options) {
   const hasPreference = (mode === 'balanced' || mode === 'personalized') &&
     Boolean(options.model?.sampleCount || (useSubscriptions && pool.some(paper => matches(paper).length)));
   const exploration = Number(settings.exploration ?? 0.25);
-  const count = Number(settings.personalizedCount ?? 32);
+  const count = Number(settings.personalizedCount ?? 50);
   return {
     date, mode, seed, model: options.model, random: randomSource(seed), pool, byId, categories, byCategory,
     availableSections, matches, useSubscriptions, hasPreference, info: new Map(),
     exploration: Number.isFinite(exploration) ? Math.max(0, Math.min(1, exploration)) : 0.25,
-    count: Number.isFinite(count) ? Math.max(1, Math.min(32, Math.trunc(count))) : 32,
+    count: Number.isFinite(count) ? Math.max(1, Math.min(200, Math.trunc(count))) : 50,
     encounters: mode === 'discovery' ? encountered(options, byId) : null,
     incomplete: options.complete === false,
   };
@@ -2935,24 +2998,41 @@ function rankPool(items, ctx) {
   return {order, first, flat, exploreBranch, count: n};
 }
 
+function quotaDescription(category, ctx) {
+  if (!category || ctx.mode === 'discovery') return '';
+  const quota = ctx.quotaDetails?.get(category);
+  if (!quota) return '';
+  if (quota.legacy) return ' This replaces a slot in the saved selection; its existing category counts are preserved.';
+  return ' The category receives ceil(sqrt(' + quota.eligibleCount + ')) = ' + quota.quota +
+    ' slot(s). Matching first maximizes distinct category coverage, then fulfilled quota slots, using the ' +
+    'paper priorities to resolve choices. Each cross-listed paper fills only one slot.';
+}
+
 function describe(paper, category, ranking, ctx) {
   const where = category ? ' for ' + category : '';
+  const quota = quotaDescription(category, ctx);
   if (ctx.mode === 'random') {
     return 'Uniform random priorities' + where + ' among ' + ranking.count +
-      ' eligible paper(s). Cross-listed papers are assigned to maximize distinct category coverage.';
+      ' eligible paper(s), without interest or author preferences.' + quota;
   }
   if (ctx.mode === 'discovery') {
-    if (!ctx.encounters.ids.size) return 'First discovery draw' + where + '. All eligible papers received uniform priorities.';
+    if (!ctx.encounters.ids.size) return 'First discovery draw' + where +
+      '. All eligible papers received uniform priorities. Discovery reserves one slot per eligible category.';
     const info = paperInfo(paper, ctx);
     return 'Discovery draw' + where + ' weighted by prior topic, category and author encounters. ' +
       info.newTopics + ' of ' + info.totalTopics + ' topic labels and ' + info.newAuthors + ' of ' +
-      info.totalAuthors + ' author IDs or names were unseen.';
+      info.totalAuthors + ' author IDs or names were unseen. Discovery reserves one slot per eligible category.';
   }
-  if (!ctx.hasPreference) return 'Cold-start draw' + where + '. Eligible papers received uniform priorities.';
-  if (ctx.mode === 'balanced' && ranking.exploreBranch) return 'Uniform exploration draw' + where +
-    ' among ' + ranking.count + ' eligible paper(s). Cross-listed papers are assigned to maximize coverage.';
+  if (!ctx.hasPreference) return ctx.mode === 'personalized' ?
+    'Global cold-start draw: uniform sampling without replacement across all eligible papers, with no category quotas.' :
+    'Cold-start draw' + where + '. Eligible papers received uniform priorities.' + quota;
+  const exploration = ' The configured random exploration chance is ' +
+    Number((100 * ctx.exploration).toFixed(6)) + '% per category ordering; it does not change the quota.';
+  if (ctx.mode === 'balanced' && ranking.exploreBranch) return 'Uniform exploration ordering' + where +
+    ' among ' + ranking.count + ' eligible paper(s).' + exploration + quota;
   const info = paperInfo(paper, ctx);
-  let text = (ctx.mode === 'personalized' ? 'Personalized draw' : 'Within-category draw') + where + '.';
+  let text = (ctx.mode === 'personalized' ? 'Global interest-weighted draw without replacement, with no category quotas' :
+    'Interest-weighted ordering') + where + '.';
   if (ctx.model?.sampleCount) {
     text += ' Weights use a local model trained on ' + ctx.model.sampleCount + ' active rating(s).';
     const term = interestEvidence(ctx.model, paper);
@@ -2960,31 +3040,37 @@ function describe(paper, category, ranking, ctx) {
   }
   if (info.followed) text += ' A followed-author match also increased its weight.';
   if (ctx.model?.sampleCount > 0 && ctx.model.sampleCount < 10) text += ' The training sample is small.';
-  return text;
+  return text + (ctx.mode === 'balanced' ? exploration + quota : '');
 }
 
 function matchedEntry(paper, code, ranking, ctx, probability) {
   return {paperId: paper.id, category: code, reason: describe(paper, code, ranking, ctx), probability};
 }
 
-function augment(code, visited, rankings, byPaper, byCategory) {
+// Identical slots share one adjacency list. Traversing a category reroutes one
+// of its occupied slots; the caller then fills the vacated slot. Thus a successful
+// path adds one paper to the starting category and preserves all other counts.
+// A category need only be visited once in an augmenting-path search, so recursion
+// depth is bounded by the number of mathematical categories, not the paper count.
+function augment(code, visited, rankings, byPaper) {
+  if (visited.has(code)) return false;
+  visited.add(code);
   for (const paper of rankings.get(code).order) {
-    if (visited.has(paper.id)) continue;
-    visited.add(paper.id);
     const previous = byPaper.get(paper.id);
-    if (previous === undefined || augment(previous, visited, rankings, byPaper, byCategory)) {
+    if (previous === code) continue;
+    if (previous === undefined || augment(previous, visited, rankings, byPaper)) {
       byPaper.set(paper.id, code);
-      byCategory.set(code, paper);
       return true;
     }
   }
   return false;
 }
 
-function missingReason(code, ctx) {
+function missingReason(code, ctx, selectedCount = 0, quota = 1) {
   const candidates = ctx.byCategory.get(code);
-  if (candidates.length) return 'All ' + candidates.length +
-    ' eligible paper(s) represent other categories in this maximum-coverage matching.';
+  if (candidates.length) return 'Cross-list overlap: ' + selectedCount + ' of ' + quota +
+    ' slots filled. The remaining eligible papers are assigned to other categories in this ' +
+    'maximum-coverage, maximum-slot matching; no further slot can be filled without reusing a paper.';
   const sections = ctx.availableSections.get(code);
   const disabled = [];
   if (sections.has('cross')) disabled.push('cross-submissions');
@@ -2995,57 +3081,65 @@ function missingReason(code, ctx) {
 }
 
 function categorySelection(ctx) {
+  const adaptive = ctx.mode === 'random' || ctx.mode === 'balanced';
+  const quotas = new Map(CODES.map(code => {
+    const eligibleCount = ctx.byCategory.get(code).length;
+    const squareRootQuota = Math.ceil(Math.sqrt(eligibleCount));
+    return [code, {eligibleCount, squareRootQuota, quota: adaptive ? squareRootQuota : Number(eligibleCount > 0)}];
+  }));
+  ctx.quotaDetails = quotas;
   const rankings = new Map(CODES.map(code => [code, rankPool(ctx.byCategory.get(code), ctx)]));
   const order = shuffled(CODES.filter(code => rankings.get(code).count), ctx.random);
   const byPaper = new Map();
-  const byCategory = new Map();
-  for (const code of order) augment(code, new Set(), rankings, byPaper, byCategory);
+  // Phase 1 is maximum bipartite matching with one slot per nonempty category.
+  // Phase 2 inserts every additional slot. Augmentation preserves all previously
+  // matched slots, so maximum breadth is retained. Inductively, inserting a slot
+  // and seeking an augmenting path maintains maximum cardinality for all slots
+  // inserted so far. At completion both priorities are mathematically optimal.
+  for (const code of order) augment(code, new Set(), rankings, byPaper);
+  const largestQuota = Math.max(0, ...order.map(code => quotas.get(code).quota));
+  for (let slot = 1; slot < largestQuota; slot++) {
+    for (const code of order) if (slot < quotas.get(code).quota) augment(code, new Set(), rankings, byPaper);
+  }
   const entries = [];
-  for (const code of order) {
-    const paper = byCategory.get(code);
-    if (!paper) continue;
+  const categoryDistribution = [];
+  for (const code of CODES) {
     const ranking = rankings.get(code);
+    const assigned = ranking.order.filter(paper => byPaper.get(paper.id) === code);
+    const {eligibleCount, squareRootQuota, quota} = quotas.get(code);
+    const selectedCount = assigned.length;
+    const reason = !eligibleCount || selectedCount < quota ? missingReason(code, ctx, selectedCount, quota) : null;
+    categoryDistribution.push({category: code, eligibleCount, squareRootQuota, quota, selectedCount, reason});
+  }
+  // Keep the randomized category presentation order, with papers ordered by their
+  // category priorities. In an isolated category this is exactly a permutation's
+  // first q entries, not repeated single draws with incorrectly reused marginals.
+  for (const code of order) {
+    const ranking = rankings.get(code);
+    const assigned = ranking.order.filter(paper => byPaper.get(paper.id) === code);
     const isolated = ctx.byCategory.get(code).every(candidate => ctx.categories.get(candidate.id).length === 1);
-    // Matching changes the inclusion probabilities of overlapping candidates.
-    entries.push(matchedEntry(paper, code, ranking, ctx, isolated ? ranking.first.get(paper.id) : null));
-  }
-  const missing = CODES.filter(code => !byCategory.has(code)).map(category =>
-    ({category, reason: missingReason(category, ctx)}));
-  return {entries, missing};
-}
-
-function coldPersonalized(ctx, count) {
-  const base = categorySelection(ctx).entries;
-  const initialCount = base.length;
-  const assigned = new Set(base.map(entry => entry.paperId));
-  let entries;
-  if (count < initialCount) {
-    entries = shuffled(base, ctx.random).slice(0, count);
-  } else {
-    const extra = shuffled(ctx.pool.filter(paper => !assigned.has(paper.id)), ctx.random).slice(0, count - initialCount);
-    entries = [...base, ...extra.map(paper => ({paperId: paper.id, category: null, probability: null,
-      reason: 'Uniform cold-start draw from the remaining papers after the available categories were represented.'}))];
-  }
-  return entries.map(entry => {
-    let probability = null;
-    if (count === ctx.pool.length) {
-      probability = 1;
-    } else {
-      const [code, ...otherCodes] = ctx.categories.get(entry.paperId);
-      const candidates = ctx.byCategory.get(code);
-      if (!otherCodes.length && candidates.every(paper => ctx.categories.get(paper.id).length === 1)) {
-        const initial = 1 / candidates.length;
-        probability = count <= initialCount ? initial * count / initialCount :
-          initial + (1 - initial) * (count - initialCount) / (ctx.pool.length - initialCount);
+    for (const paper of assigned) {
+      let probability = null;
+      if (isolated) {
+        if (assigned.length === ranking.count) probability = 1;
+        else if (ranking.flat) probability = assigned.length / ranking.count;
+        else if (assigned.length === 1) probability = ranking.first.get(paper.id);
       }
+      // Cross-list matching and weighted multiple draws generally change the
+      // marginal inclusion probability; no first-draw proxy is reported for them.
+      entries.push(matchedEntry(paper, code, ranking, ctx, probability));
     }
-    return {...entry, probability};
-  });
+  }
+  const missing = categoryDistribution.filter(row => row.reason !== null)
+    .map(({category, reason}) => ({category, reason}));
+  const targetSize = categoryDistribution.reduce((sum, row) => sum + row.quota, 0);
+  return {entries, missing, samplingVersion: 2, targetSize, shortfall: targetSize - entries.length, categoryDistribution};
 }
 
 function personalized(ctx) {
   const count = Math.min(ctx.count, ctx.pool.length);
-  if (!ctx.hasPreference) return coldPersonalized(ctx, count);
+  // Cold start is the same global sampler with equal weights, not category-first
+  // sampling. This preserves the no-quota contract even before the first rating.
   const ranking = rankPool(ctx.pool, ctx);
   return ranking.order.slice(0, count).map(paper => {
     let probability = null;
@@ -3076,24 +3170,22 @@ function generateSelection(papers, options = {}) {
 function crossListedReplacement(selection, paperId, target, ctx) {
   const rankings = new Map();
   const byPaper = new Map();
-  const byCategory = new Map();
   for (const entry of selection.entries) {
     if (!ctx.byCategory.has(entry.category)) return null;
     if (entry.paperId !== paperId) {
       const paper = ctx.byId.get(entry.paperId);
       if (!paper || !ctx.categories.get(paper.id).includes(entry.category)) return null;
       byPaper.set(paper.id, entry.category);
-      byCategory.set(entry.category, paper);
     }
   }
   const retained = new Set(byPaper.keys());
-  for (const {category} of selection.entries) {
+  for (const category of new Set(selection.entries.map(entry => entry.category))) {
     const ranking = rankPool(ctx.byCategory.get(category).filter(paper => paper.id !== paperId), ctx);
     // Prefer ending a path at an unused paper to unnecessary reassignment.
     ranking.order = [...ranking.order.filter(paper => !retained.has(paper.id)), ...ranking.order.filter(paper => retained.has(paper.id))];
     rankings.set(category, ranking);
   }
-  if (!augment(target.category, new Set(), rankings, byPaper, byCategory)) return null;
+  if (!augment(target.category, new Set(), rankings, byPaper)) return null;
   const added = [...byPaper.keys()].find(id => !retained.has(id));
   if (!added) return null;
   return selection.entries.map(entry => {
@@ -3101,7 +3193,7 @@ function crossListedReplacement(selection, paperId, target, ctx) {
     const code = byPaper.get(id);
     if (id === entry.paperId && code === entry.category) return entry;
     const updated = matchedEntry(ctx.byId.get(id), code, rankings.get(code), ctx, null);
-    return {...updated, reason: 'A cross-list reassignment preserved the represented categories. ' + updated.reason};
+    return {...updated, reason: 'A cross-list reassignment preserved every existing category count. ' + updated.reason};
   });
 }
 
@@ -3112,6 +3204,14 @@ function replaceSelectionPaper(selection, paperId, papers, options = {}) {
     seed: options.seed ?? (String(selection.seed) + '|replace|' + paperId)});
   const selected = new Set(selection.entries.map(entry => entry.paperId));
   const quota = ['random', 'balanced', 'discovery'].includes(ctx.mode);
+  if (quota) {
+    // A replacement is an edit to the saved selection, never a quota migration or
+    // automatic historical redraw. Preserve both old and new selection counts.
+    ctx.quotaDetails = new Map((selection.categoryDistribution || []).map(row => [row.category, row]));
+    if (!ctx.quotaDetails.size) for (const entry of selection.entries) {
+      ctx.quotaDetails.set(entry.category, {legacy: true});
+    }
+  }
   const candidates = (quota ? ctx.byCategory.get(target.category) || [] : ctx.pool).filter(paper =>
     !selected.has(paper.id) && (ctx.mode !== 'subscriptions' || ctx.matches(paper).length));
   let entries;
@@ -3121,6 +3221,8 @@ function replaceSelectionPaper(selection, paperId, papers, options = {}) {
     const entry = ctx.mode === 'subscriptions' ? followedEntry(paper, ctx) :
       matchedEntry(paper, quota ? target.category : null, ranking, ctx, ranking.first.get(paper.id));
     if (ctx.mode === 'subscriptions') entry.probability = 1 / candidates.length;
+    entry.reason = 'Replacement draw from ' + candidates.length + ' currently unselected eligible paper(s). ' +
+      'Any recorded probability is conditional on this replacement pool. ' + entry.reason;
     entries = selection.entries.map(old => old.paperId === paperId ? entry : old);
   } else if (quota) {
     entries = crossListedReplacement(selection, paperId, target, ctx);
@@ -3438,6 +3540,7 @@ summary{cursor:pointer;display:list-item;max-width:max-content}
 .more-tools{margin-top:8px}.more-actions{font-size:12px}.authors{font-size:13px}.authors button{font-size:12px;margin:0 5px 3px}
 .selection-note{font-size:12px;margin:8px 0 2px}.selection-note>details{display:inline-block;margin-left:10px;vertical-align:top}.selection-note p{max-width:70ch}
 :host(#ad-listing-controls){margin:12px 0;font-size:14px}.listing-summary{margin:4px 0}.selection-options{font-size:13px;margin:6px 0}.selection-options>.field{margin:8px 0}.selection-options .muted{color:inherit;opacity:.8}
+.selection-distribution{font-size:13px;margin:8px 0;max-width:100%;min-width:0}.category-distribution .table-wrap{max-width:100%;margin:8px 0}.category-distribution table{min-width:720px}.category-distribution .muted{color:inherit;opacity:.8}
 .inline-notice{font-size:13px;max-width:80ch}.inline-ai{border-left:2px solid var(--line);padding:4px 14px;margin:12px 0;max-width:85ch;background:var(--bg);color:var(--fg)}.inline-ai h3{font-size:15px;margin:5px 0}.inline-ai button{color:var(--link)}
 .notice{padding:10px 12px;background:var(--soft);border-left:3px solid var(--accent);margin:10px 0}.error{border-left-color:#bd3030}
 dialog{padding:0;border:1px solid var(--line);border-radius:5px;color:var(--fg);background:var(--bg);width:min(940px,calc(100vw - 32px));max-width:calc(100vw - 32px);max-height:88vh;box-shadow:0 8px 40px #0003}dialog::backdrop{background:#0004}

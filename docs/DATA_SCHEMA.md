@@ -21,7 +21,22 @@ Papers use modern or legacy arXiv identifiers. A known version is a positive int
 
 Each draw records its date, mode, seed, unique paper entries and missing categories with reasons. An entry includes its paper, assigned category if applicable, explanation and an optional probability. Null represents an unavailable probability. The original draw stays available when regenerating or replacing one paper. Distinguishing listing archives gives the overall mathematics listing and subject-specific listings separate saved draws on the same date.
 
+Release 1.2 adds optional sampling metadata to newly generated Random, Balanced and Discovery draws without changing the backup envelope or storage namespace. `samplingVersion: 2` identifies the new sampler. `targetSize` is the sum of applied quotas and `shortfall` is the target minus the number of distinct selected papers. `categoryDistribution` contains one row for each mathematics category:
+
+| Field | Meaning |
+| --- | --- |
+| `category` | Canonical mathematics category code. |
+| `eligibleCount` | Distinct eligible papers in that category at generation time. A cross-listed paper contributes to each of its eligible pools. |
+| `squareRootQuota` | `ceil(sqrt(eligibleCount))`, including zero for an empty category. |
+| `quota` | Applied quota: the square-root value in Random/Balanced, or zero/one in Discovery. |
+| `selectedCount` | Papers assigned to this category's slots. Each selected paper is counted once across the distribution. |
+| `reason` | An unmet-quota or empty-pool explanation; `null` when the nonempty quota is fulfilled. |
+
+The schema validates the quota formula, row identities, assigned counts and aggregate totals. This metadata is a generation-time snapshot, not a live calculation from subsequently changed papers or preferences. Legacy selections without these optional fields remain valid and are not backfilled. Their current draw, original draw and revisions round-trip without changing membership or historical reasons. Personalized and Subscriptions do not gain category quotas.
+
 The 1.0 release stored daily selections without their listing archive. Those records remain available under **Previous daily selections**, including their original draws and revisions. Version 1.1 creates a fresh first draw for each archive-specific key. Simultaneous first requests share the first saved draw. Reopening that draw reads the existing record without issuing a change notification to other tabs. An edit checks the current draw and revision count under the same lock before appending to the saved history. A reader whose tab holds an older revision can reopen the current selection and retry the change.
+
+Version 1.2 uses an automatic-size key for new non-Personalized draws and reuses existing archive-specific records whose older key included a Personalized count. Changing the Personalized size therefore does not create a different Random, Balanced or Discovery draw for the same date, archive and eligibility settings. Personalized keys continue to distinguish configured sizes. Stored size preferences such as 32 remain intact; only missing settings receive the new default of 50.
 
 ## Revisions and learning
 
@@ -44,6 +59,6 @@ Public IndexedDB listing records contain a cache time and allowlisted public met
 - The JSON file contains the personal collections, including free-text notes and saved explanations. The AI pairing token is blank, and AI generation and consent flags are false.
 - Backup data is validated recursively, including archived and feedback paper snapshots. Unknown fields are discarded. Invalid supported fields, excessive nesting, unsafe keys and unsupported schema versions reject the import before writes.
 - The file limit is 50,000,000 bytes. The maximum nesting depth is 30 and each top-level collection accepts up to 100,000 records. Calendar dates use real UTC calendar days. Personal timestamps include a timezone.
-- Numeric settings are bounded. Exploration ranges from 0 to 1 and personalized selection size ranges from 1 to 32 papers. A per-paper spoiler override accepts a boolean. AI endpoints use `http://127.0.0.1` with an optional port. Browser and server ceilings both apply to live AI requests.
+- Numeric settings are bounded. Exploration ranges from 0 to 1 and personalized selection size ranges from 1 to 200 papers, with a default of 50. Random and Balanced have no predetermined daily selection cap; their validated entries are bounded only by the existing record-safety limit and their calculated quotas. A per-paper spoiler override accepts a boolean. AI endpoints use `http://127.0.0.1` with an optional port. Browser and server ceilings both apply to live AI requests.
 - Import merges records by key. Re-importing the same backup replaces the same keys. A revision can reference an existing event for that paper, so a partial backup can complete an existing chain. Missing collections contribute no new records.
 - The transfer formats for reading and feedback are CSV. Bookmarks export as BibTeX. Those formats support external reading and reference tools. The JSON backup is the format used for restoration.

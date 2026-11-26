@@ -28,7 +28,8 @@ const doc = {
 
 test('the pinned renderer matches the upstream tagged artifact including its exact byte length', () => {
   const bytes = readFileSync(new URL('../vendor/temml.js', import.meta.url));
-  const upstream = bytes.subarray(0, bytes.indexOf('\n/*! arXiv Discovery packaging.'));
+  const marker = bytes.indexOf('\n/*! arXiv Discovery packaging.');
+  const upstream = bytes.subarray(0, bytes[marker - 1] === 13 ? marker - 1 : marker);
   assert.equal(upstream.length, 167881);
   assert.equal(createHash('sha256').update(upstream).digest('hex'), '56b4338176d39170692503b8b7ec630d3edf8e10861895658deb74aefb66af9d');
 });
@@ -73,4 +74,37 @@ test('ordinary markup-like text stays text and separate formulas do not share cu
   assert.equal(result.children[0].text, '<b>source</b> ');
   assert.ok(result.children.some(node => node.text === '$\\uniqueLocalTerm$'));
   assert.ok([...result.walk()].every(node => node.name.startsWith('#') || node.namespace === 'http://www.w3.org/1998/Math/MathML'));
+});
+
+test('AI explanations recover recognizable bare TeX alongside normal delimited formulas', () => {
+  const input = String.raw`In L^{p}(\mathbb{T}), take \Omega\subset\mathbb{C}, solve \Delta f = 0, and write f=h+\overline{g}. Also \(x^2\).`;
+  const result = mathFragment(doc, input, {recoverBareTex:true});
+  const annotations = [...result.walk()].filter(node => node.name === 'annotation').map(node => node.textContent);
+  assert.deepEqual(annotations, [String.raw`L^{p}(\mathbb{T})`, String.raw`\Omega\subset\mathbb{C}`, String.raw`\Delta f = 0`, String.raw`f=h+\overline{g}`, 'x^2']);
+  assert.equal(result.children.at(-1).text, '.');
+  assert.equal(mathFragment(doc, input).children.filter(node => node.name === 'math').length, 1);
+});
+
+test('bare TeX recovery preserves ordinary text, escaped backslashes, and unsupported commands', () => {
+  const input = String.raw`Visit C:\Users\reader and \\alpha; keep \UndefinedCustomMacro{x} and <b>text</b>.`;
+  const result = mathFragment(doc, input, {recoverBareTex:true});
+  assert.equal(result.textContent, input);
+  assert.equal(result.children.filter(node => node.name === 'math').length, 0);
+});
+
+test('recovers a bare mapping with an integral and TeX spacing as one formula', () => {
+  const formula = String.raw`t\mapsto\int_{0}^{t}f^{2}(s)\mathop{}\!ds`;
+  const result = mathFragment(doc, 'Rescale by ' + formula + '. End.', {recoverBareTex:true});
+  const annotations = [...result.walk()].filter(node => node.name === 'annotation').map(node => node.textContent);
+  assert.deepEqual(annotations, [formula]);
+  assert.equal(result.children.at(-1).text, '. End.');
+});
+
+test('AI explanations render compact undelimited scripted notation without swallowing prose', () => {
+  const input = String.raw`Take q_{i}, components B_{j,k}, |M(G)|_{j,k}, and |M|=(MM^{*})^{1/2}. Already \(z_{r}\). Keep snake_case and identifier_{text}.`;
+  const result = mathFragment(doc, input, {recoverBareTex:true});
+  const annotations = [...result.walk()].filter(node => node.name === 'annotation').map(node => node.textContent);
+  assert.deepEqual(annotations, [String.raw`q_{i}`, String.raw`B_{j,k}`, String.raw`|M(G)|_{j,k}`, String.raw`|M|=(MM^{*})^{1/2}`, String.raw`z_{r}`]);
+  assert.equal(result.children.at(-1).text, '. Keep snake_case and identifier_{text}.');
+  assert.equal(mathFragment(doc, input).children.filter(node => node.name === 'math').length, 1);
 });

@@ -1,6 +1,8 @@
 // Changing the grounding protocol or response policy must invalidate old explanations.
 const PROMPT_VERSION = 1;
 const CACHE_VERSION = 2;
+// Older protected answers were generated before tighter spoiler filtering.
+const PROTECTED_CACHE_VERSION = 3;
 const ID_PATTERN = /^(?:\d{4}\.\d{4,5}|[a-z][a-z.-]*\/\d{7})$/i;
 const MODEL_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/;
 const LEVELS = new Set(['unfamiliar', 'introduced', 'developing', 'comfortable', 'proficient', 'advanced']);
@@ -137,7 +139,7 @@ export class AIClient {
       throw new Error('Pair this browser with the local bridge using its random pairing token.');
     }
     const provider = ai.provider || 'local';
-    if (!['local', 'openai'].includes(provider) || !MODEL_PATTERN.test(ai.model || '')) {
+    if (!['local', 'openai', 'gemini'].includes(provider) || !MODEL_PATTERN.test(ai.model || '')) {
       throw new Error('Choose a provider and enter the exact model name allowed by the bridge.');
     }
     if (!paper || !ID_PATTERN.test(paper.id) || !Number.isInteger(paper.version) || paper.version < 0 || paper.version > 9999) {
@@ -168,7 +170,7 @@ export class AIClient {
     const knowledge = profileTopics(await this.getKnowledge(), context);
     const prompt = { protocol: PROMPT_VERSION, provider, model: ai.model, profile, action, paper: metadata,
       noSpoilers, detail, term, question, context: readerContext, knowledge };
-    const stamp = await fingerprint([CACHE_VERSION, origin, prompt, limits.maxInputChars, limits.maxOutputTokens]);
+    const stamp = await fingerprint([noSpoilers ? PROTECTED_CACHE_VERSION : CACHE_VERSION, origin, prompt, limits.maxInputChars, limits.maxOutputTokens]);
     const key = 'ai:' + paper.id + ':v' + paper.version + ':' + stamp;
     if (generation !== await this.getGeneration()) throw new Error('Saved data changed while preparing this request. Please request the explanation again.');
     const pendingKey = key + ':generation:' + generation;
@@ -182,7 +184,7 @@ export class AIClient {
       if (saved && age >= 0 && age < cacheAgeLimit) {
         try { return { ...checkResult(saved, paper), cached: true }; } catch { /* Replace invalid imported cache entries. */ }
       }
-      if (!limits.dailyRequests || (provider === 'openai' && !limits.dailyBudget)) {
+      if (!limits.dailyRequests || (provider !== 'local' && !limits.dailyBudget)) {
         throw new Error('The configured daily AI allowance is zero.');
       }
       if (generation !== await this.getGeneration()) throw new Error('Saved data changed while preparing this request. Please request the explanation again.');

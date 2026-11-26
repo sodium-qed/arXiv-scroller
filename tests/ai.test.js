@@ -49,6 +49,15 @@ test('only deliberate requests with consent, pairing, and exact loopback origin 
   assert.ok(!call.init.body.includes(token) && !call.init.body.includes('secret-history') && !call.init.body.includes('private'));
 });
 
+test('Gemini uses the paired bridge and requires a nonzero hosted budget', async () => {
+  const ctx = setup({ ai: { provider: 'gemini', dailyBudget: 1 } });
+  await ctx.client.overview(paper);
+  assert.equal(ctx.calls[0].payload.provider, 'gemini');
+  const blocked = setup({ ai: { provider: 'gemini', dailyBudget: 0 } });
+  await assert.rejects(blocked.client.overview(paper), /allowance is zero/);
+  assert.equal(blocked.calls.length, 0);
+});
+
 test('repeat requests, including simultaneous requests, use one provider generation', async () => {
   const ctx = setup();
   const pair = await Promise.all([ctx.client.overview(paper), ctx.client.overview(paper)]);

@@ -6,6 +6,9 @@ node_modules/
 .env.*
 !.env.example
 bridge/.state/
+/pairing-token.txt
+/usage.sqlite3
+/usage.sqlite3-*
 test-output/
 *.log
 .DS_Store

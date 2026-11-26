@@ -1,6 +1,6 @@
 {
   "name": "arxiv-discovery-userscript",
-  "version": "1.2.0",
+  "version": "1.2.4",
   "private": true,
   "type": "module",
   "description": "An additive, local-first Tampermonkey research discovery companion for arXiv.",

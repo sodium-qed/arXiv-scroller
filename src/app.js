@@ -563,7 +563,7 @@ export class DiscoveryApp {
     body.append(element('h3',{},'Saved glossary'));
     const entries=Object.entries(this.state.glossary).sort((a,b)=>String(b[1].updatedAt).localeCompare(String(a[1].updatedAt)));
     if(!entries.length)body.append(element('p',{},'Highlight a term in a title, abstract, full HTML paper, or explanation, then choose Explain selection.'));
-    for(const [key,g] of entries)body.append(element('details',{class:'card'},element('summary',{},`${g.term} · ${g.status||'unfamiliar'} · ${g.visits||1} visit(s)`),element('p',{class:'answer','data-paper-id':g.paperId},mathFragment(document,g.answer)),field('Understanding',select([['unfamiliar','Unfamiliar'],['partial','Partially understood'],['understood','Understood']],g.status||'unfamiliar',async e=>{g.status=e.target.value;g.updatedAt=isoNow();await this.store.set('glossary',key,g);})),this.button('Delete term',async()=>{await this.store.remove('glossary',key);delete this.state.glossary[key];this.openKnowledge();})));
+    for(const [key,g] of entries)body.append(element('details',{class:'card'},element('summary',{},`${g.term} · ${g.status||'unfamiliar'} · ${g.visits||1} visit(s)`),element('p',{class:'answer','data-paper-id':g.paperId},mathFragment(document,g.answer,{recoverBareTex:true})),field('Understanding',select([['unfamiliar','Unfamiliar'],['partial','Partially understood'],['understood','Understood']],g.status||'unfamiliar',async e=>{g.status=e.target.value;g.updatedAt=isoNow();await this.store.set('glossary',key,g);})),this.button('Delete term',async()=>{await this.store.remove('glossary',key);delete this.state.glossary[key];this.openKnowledge();})));
   }
   async pairBridge() {
     const token=prompt('Paste the pairing token printed by your local AI bridge. This is not a hosted-provider API key. The token is stored only in Tampermonkey private storage.');
@@ -610,8 +610,8 @@ export class DiscoveryApp {
   }
   aiSettings(body) {
     const a=this.state.settings.ai;
-    body.append(element('h3',{},'Optional AI explanations'),element('p',{class:'notice'},'AI runs only when requested. The paired local bridge retrieves this paper and sends source text, your explicit knowledge profile, the selected term or follow-up, and its surrounding explanation context to the chosen provider. Interest feedback, bookmarks, subscriptions, and browsing history are not sent. Provider keys belong in the bridge environment, never here.'));
-    const provider=select([['local','Local OpenAI-compatible model'],['openai','Hosted OpenAI API']],a.provider||'local');
+    body.append(element('h3',{},'Optional AI explanations'),element('p',{class:'notice'},'AI runs only when requested. The paired local bridge retrieves this paper and sends source text, your explicit knowledge profile, the selected term or follow-up, and its surrounding explanation context to the chosen provider. Interest feedback, bookmarks, subscriptions, and browsing history are not sent. Provider keys belong in the bridge environment, never here. Google may use free-tier Gemini prompts and responses to improve its products.'));
+    const provider=select([['local','Local OpenAI-compatible model'],['openai','Hosted OpenAI API'],['gemini','Google Gemini API']],a.provider||'local');
     const url=element('input',{type:'url',value:a.url});const model=element('input',{type:'text',value:a.model,placeholder:'Model allowed by your bridge'});
     const profile=select([['quick','Quick (local; abstract first)'],['full','Detailed (full-paper excerpts)']],a.profile||'quick');
     const timeout=element('input',{type:'number',min:60,max:600,value:a.timeoutSeconds||420});
@@ -660,7 +660,7 @@ export class DiscoveryApp {
       if(!body.isConnected||this.inlineAI.get(paper.id)!==body)return;if(generation!==await this.store.generation()){loading.textContent='Saved data changed while this request was running. The answer was not added to the glossary.';return;}loading.remove();
       const source=element('div',{class:'source'},`${result.cached?'Cached · ':''}Source analyzed: ${result.source.kind.toUpperCase()} · `,link('Open analyzed source',result.source.url),element('p',{},result.source.note||''));
       if(result.source.citations?.length) source.append(element('div',{class:'row'},result.source.citations.map(c=>link(c.label,c.url))));
-      body.append(source,element('p',{class:'answer','data-paper-id':paper.id},mathFragment(document,result.text)));
+      body.append(source,element('p',{class:'answer','data-paper-id':paper.id},mathFragment(document,result.text,{recoverBareTex:true})));
       if(result.usage)body.append(element('p',{class:'muted'},`Reported usage: ${result.usage.inputTokens??'unknown'} input / ${result.usage.outputTokens??'unknown'} output tokens · estimated $${Number(result.usage.estimatedCostUsd||0).toFixed(4)}. Verify important mathematical claims against the linked source.`));
       if(term) {
         const key=`${paper.versionedId||paper.id}:${term.toLocaleLowerCase()}`;const old=this.state.glossary[key];const at=isoNow();

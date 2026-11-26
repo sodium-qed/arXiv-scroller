@@ -8,6 +8,50 @@ const MAX_NODES = 1_200;
 const MAX_DEPTH = 64;
 const endOf = new Map([['$', '$'], ['$$', '$$'], ['\\(', '\\)'], ['\\[', '\\]']]);
 
+// AI output occasionally omits math delimiters despite the prompt. Recover only
+// recognizable, compact TeX commands and retain the original text as fallback.
+// This is intentionally limited to AI explanations, never raw paper content.
+const bareCommand = String.raw`\\(?:alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|pi|rho|sigma|tau|phi|varphi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Phi|Psi|Omega|mathbb|mathcal|mathbf|mathrm|mathit|mathop|overline|underline|hat|bar|vec|sqrt|frac|partial|nabla|infty|subset|subseteq|supset|supseteq|in|notin|leq|geq|neq|approx|times|cdot|to|mapsto|rightarrow|leftarrow|sum|prod|int)(?![A-Za-z])`;
+const bareArg = String.raw`\{[A-Za-z0-9+\-=_^ ]{0,80}\}`;
+const bareScript = String.raw`[_^](?:${bareArg}|[A-Za-z0-9])`;
+const bareAtom = String.raw`[A-Za-z](?:${bareScript}){0,3}`;
+const bareMacro = String.raw`${bareCommand}(?:${bareArg}){0,2}(?:${bareScript}){0,3}`;
+const bareTex = new RegExp(
+  String.raw`(?<![\w\\])(?:${bareAtom}(?:[=+*/-]${bareAtom}){0,8}[=+*/(\-]?)?${bareMacro}(?:${bareMacro}|${bareScript}|${bareAtom}|\\[!,;:]|[()+*/\-]|\d{1,12}){0,40}(?:\s+[A-Za-z](?![A-Za-z])(?=\s*[=<>]))?(?:\s*[=<>]\s*(?:[A-Za-z](?![A-Za-z])|\d{1,12}))?`, 'g');
+
+// Also recover compact scripted expressions that have no TeX commands at all.
+// Require a braced script and keep the alphabet small so ordinary prose and
+// identifiers such as snake_case remain untouched.
+const bareBracedScript = String.raw`[_^]\{[A-Za-z0-9,+*/ \-]{1,32}\}`;
+const bareScriptedExpression = new RegExp(
+  String.raw`(?<![\w\\])(?=[A-Za-z0-9|(])(?=(?:[A-Za-z0-9|()=+*/-]|${bareBracedScript}){0,60}${bareBracedScript})(?:[A-Za-z]{1,3}(?![A-Za-z])|[0-9|()=+*/-]|${bareBracedScript}){1,150}(?![\w])`, 'g');
+
+function bareMathParts(text) {
+  const parts = [];
+  let cursor = 0;
+  for (const match of text.matchAll(bareTex)) {
+    if (match.index > cursor) parts.push({text:text.slice(cursor, match.index)});
+    parts.push({text:match[0], tex:match[0], display:false});
+    cursor = match.index + match[0].length;
+    if (parts.length >= MAX_FORMULAS * 2) break;
+  }
+  if (cursor < text.length || !parts.length) parts.push({text:text.slice(cursor)});
+  return parts;
+}
+
+function bareScriptParts(text) {
+  const parts = [];
+  let cursor = 0;
+  for (const match of text.matchAll(bareScriptedExpression)) {
+    if (match.index > cursor) parts.push({text:text.slice(cursor, match.index)});
+    parts.push({text:match[0], tex:match[0], display:false});
+    cursor = match.index + match[0].length;
+    if (parts.length >= MAX_FORMULAS * 2) break;
+  }
+  if (cursor < text.length || !parts.length) parts.push({text:text.slice(cursor)});
+  return parts;
+}
+
 function escaped(text, index) {
   let start = index;
   while (start && text[start - 1] === '\\') start--;
@@ -56,7 +100,7 @@ const tags = new Set(('math semantics annotation mrow mi mn mo mtext mspace ms '
 const flagAttrs = new Set(('stretchy fence separator symmetric movablelimits largeop ' +
   'accent accentunder displaystyle bevelled').split(' '));
 const metricAttrs = new Set('width height depth lspace rspace minsize maxsize linethickness voffset'.split(' '));
-const metricStyles = new Set('padding paddingLeft paddingRight paddingTop paddingBottom verticalAlign width height'.split(' '));
+const metricStyles = new Set('padding paddingLeft paddingRight paddingTop paddingBottom marginLeft marginRight verticalAlign width height'.split(' '));
 const dimension = /^(?:0|[+-]?(?:\d{1,2}(?:\.\d{1,5})?|\.\d{1,5})(?:em|ex|px|pt)|100%|50%)$/;
 const plainClasses = /^(?:mathcal|tml-(?:display|prime|(?:sml|med|lrg)-pad|(?:hat|tilde)-[1-4]|jot|small)|(?:chr|wbk)-(?:sml|med|lrg|acc)(?:-acc|-vec)?)$/;
 const values = new Map([
@@ -111,10 +155,17 @@ function copyTree(doc, node, budget, depth = 0) {
 
 // Only insert newly created text and MathML nodes. The pinned renderer returns
 // its abstract tree. Neither the paper nor the renderer supplies live markup.
-export function mathFragment(doc, value) {
+export function mathFragment(doc, value, options = {}) {
   const fragment = doc.createDocumentFragment();
-  for (const part of mathParts(String(value ?? ''))) {
-    if (part.tex !== undefined) {
+  const source = String(value ?? '');
+  const parsed = mathParts(source);
+  const parts = options.recoverBareTex && source.length <= MAX_FIELD
+    ? parsed.flatMap(part => part.tex === undefined ? bareMathParts(part.text) : [part])
+      .flatMap(part => part.tex === undefined ? bareScriptParts(part.text) : [part])
+    : parsed;
+  let rendered = 0;
+  for (const part of parts) {
+    if (part.tex !== undefined && rendered++ < MAX_FORMULAS) {
       try {
         const tree = temml.__renderToMathMLTree(part.tex, {
           displayMode:part.display, annotate:true, throwOnError:true, strict:true, trust:false,

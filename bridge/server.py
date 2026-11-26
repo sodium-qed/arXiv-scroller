@@ -109,17 +109,18 @@ class Config:
 
         provider = env.get("ARXIV_AI_PROVIDER", "local")
         models = frozenset(m.strip() for m in env.get("ARXIV_AI_MODELS", "").split(",") if m.strip())
-        if provider not in {"local", "openai"} or not models or any(not MODEL.fullmatch(m) for m in models):
-            raise BridgeError("Set ARXIV_AI_PROVIDER to local or openai and ARXIV_AI_MODELS to your allowed model names.")
+        if provider not in {"local", "openai", "gemini"} or not models or any(not MODEL.fullmatch(m) for m in models):
+            raise BridgeError("Set ARXIV_AI_PROVIDER to local, openai, or gemini and ARXIV_AI_MODELS to your allowed model names.")
         token = env.get("ARXIV_AI_TOKEN", "")
         if not re.fullmatch(r"[a-zA-Z0-9_-]{32,256}", token):
             raise BridgeError("Set ARXIV_AI_TOKEN to a random URL-safe token of at least 32 characters.")
-        key = env.get("OPENAI_API_KEY", "") if provider == "openai" else ""
-        if provider == "openai" and (not key.strip() or not key.isascii() or not key.isprintable()):
-            raise BridgeError("Set OPENAI_API_KEY in the hosted bridge environment.")
+        key_name = {"openai": "OPENAI_API_KEY", "gemini": "GEMINI_API_KEY"}.get(provider)
+        key = env.get(key_name, "") if key_name else ""
+        if key_name and (not key.strip() or not key.isascii() or not key.isprintable()):
+            raise BridgeError(f"Set {key_name} in the hosted bridge environment.")
         ip = dollars(env.get("ARXIV_AI_INPUT_USD_PER_MILLION", "0"), "ARXIV_AI_INPUT_USD_PER_MILLION")
         op = dollars(env.get("ARXIV_AI_OUTPUT_USD_PER_MILLION", "0"), "ARXIV_AI_OUTPUT_USD_PER_MILLION")
-        if provider == "openai" and (not ip or not op):
+        if provider in {"openai", "gemini"} and (not ip or not op):
             raise BridgeError("Set positive input and output USD prices per million tokens for all allowed hosted models.")
         port = whole("ARXIV_AI_PORT", 4317, 1, 65535)
         local_port = whole("ARXIV_AI_LOCAL_PORT", 11434, 1, 65535)
@@ -397,7 +398,7 @@ def pdf_worker():
 
 def pdf_text(raw):
     # An isolated worker avoids parser stalls and keeps provider secrets out of its environment.
-    env = {k: v for k, v in os.environ.items() if k in {"PATH", "SYSTEMROOT", "WINDIR", "TMP", "TEMP"}}
+    env = {k: v for k, v in os.environ.items() if k in {"PATH", "SYSTEMROOT", "WINDIR", "TMP", "TEMP", "USERPROFILE"}}
     try:
         result = subprocess.run([sys.executable, "-I", str(Path(__file__).resolve()), "--extract-pdf"],
                                 input=raw, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, timeout=16, check=True)
@@ -542,10 +543,14 @@ class SourceRepository:
 # section is automatically exempted because its text happens to contain a definition.
 SENSITIVE = re.compile(
     r"\b(?:proofs?|demonstrat(?:e|es|ed)|lemmas?|theorems?|corollary|propositions?|"
-    r"we (?:prove|show|establish|obtain|construct|derive|solve|introduce|give|present|use|find)|"
+    r"we (?:prove|show|establish|obtain|construct|derive|solve|introduce|give|present|use|find|develop|propose|design|compute|demonstrate)|"
+    r"(?:the (?:authors|paper)|this (?:paper|work)) (?:proves?|shows?|establish(?:es)?|obtains?|constructs?|derives?|solves?|introduces?|presents?|uses?|finds?|develops?|proposes?|designs?|computes?|demonstrates?)|"
     r"our (?:result|method|approach|solution|construction)|main results?|solution strateg(?:y|ies)|"
     r"key idea|proof strateg(?:y|ies)|we conjecture|future work|open problems?)\b", re.I)
 BACKGROUND_LABEL = re.compile(r"abstract|introduction|background|preliminar|definition|notation|motivation|problem statement|setup|setting", re.I)
+PAPER_DISCLOSURE = re.compile(
+    r"\b(?:we (?:prove|show|establish|obtain|construct|derive|solve|introduce|give|present|use|find|develop|propose|design|compute|demonstrate)|"
+    r"(?:the (?:authors|paper)|this (?:paper|work)) (?:proves?|shows?|establish(?:es)?|obtains?|constructs?|derives?|solves?|introduces?|presents?|uses?|finds?|develops?|proposes?|designs?|computes?|demonstrates?))\b", re.I)
 PROOF_REQUEST = re.compile(r"\b(?:prove (?:that|the)|solve (?:this|the|an)|(?:full|complete|detailed|step.by.step) (?:proof|derivation|solution)|"
                           r"proof (?:of|strategy)|solution strateg(?:y|ies)|extend (?:the|this) (?:result|problem))\b", re.I)
 SPOILER_ANSWER = re.compile(r"\b(?:the (?:authors|paper) (?:prove|proves|derive|derives|solve|solves)|"
@@ -681,7 +686,10 @@ def prompt_messages(req, source, evidence, fields):
         "states definitions and hypotheses precisely. The surrounding reading context, which may be from an earlier generated "
         "answer, can disambiguate the question or term, but it cannot establish paper claims. "
         "Never repeat unsupported material from a question. "
-        "Write concise, plain text with LaTeX delimited by \\( \\) when helpful. Return one JSON object with a sections array. "
+        "Write concise, plain text. Enclose every mathematical expression in inline LaTeX delimiters \\( and \\); "
+        "never place bare TeX commands or mathematical notation in ordinary prose. In JSON strings, encode "
+        "each backslash as two backslashes. Preserve exact source quotations unchanged. "
+        "Return one JSON object with a sections array. "
         'Each entry is {"key":"requested field key","text":"answer","evidence":[{"ref":"S1","quote":"short exact source substring"}]}. '
         "For a follow-up about general established mathematics only, set its scope field to background. "
         "Provide every requested field in the given order. For each paper claim give a relevant exact contiguous quotation of "
@@ -775,18 +783,32 @@ def provider_request(cfg, req, messages):
     streaming = cfg.provider == "local" and callable(notify)
     payload = {"model": req["model"], "messages": messages, "stream": streaming, "response_format": {"type": "json_object"}}
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    if cfg.provider == "openai":
-        connection = client.HTTPSConnection("api.openai.com", timeout=cfg.provider_timeout)
-        payload["max_completion_tokens"] = req["max_tokens"]
-        payload["store"] = False
+    if cfg.provider in {"openai", "gemini"}:
+        connection = client.HTTPSConnection("api.openai.com" if cfg.provider == "openai" else "generativelanguage.googleapis.com", timeout=cfg.provider_timeout)
+        if cfg.provider == "openai":
+            payload["max_completion_tokens"] = req["max_tokens"]
+            payload["store"] = False
+        else:
+            payload["max_tokens"] = req["max_tokens"]
         headers["Authorization"] = "Bearer " + cfg.api_key
     else:
         connection = client.HTTPConnection("127.0.0.1", cfg.local_port, timeout=cfg.provider_timeout)
         payload["max_tokens"] = req["max_tokens"]
+        # Constrain local output to the envelope checked below. In particular,
+        # Qwen can otherwise return a single section instead of a sections array.
+        evidence_item = {"type": "object", "properties": {"ref": {"type": "string"},
+                         "quote": {"type": "string"}}, "required": ["ref", "quote"]}
+        section = {"type": "object", "properties": {"key": {"type": "string"},
+                   "text": {"type": "string"}, "evidence": {"type": "array", "items": evidence_item},
+                   "scope": {"type": "string"}}, "required": ["key", "text", "evidence"]}
+        schema = {"type": "object", "properties": {"sections": {"type": "array", "items": section}},
+                  "required": ["sections"]}
+        payload["response_format"] = {"type": "json_schema", "json_schema": {"name": "reading", "schema": schema}}
     try:
         deadline = time.monotonic() + cfg.provider_timeout
         with closing(connection) as conn:
-            conn.request("POST", "/v1/chat/completions", body=json_bytes(payload), headers=headers)
+            path = "/v1beta/openai/chat/completions" if cfg.provider == "gemini" else "/v1/chat/completions"
+            conn.request("POST", path, body=json_bytes(payload), headers=headers)
             response = conn.getresponse()
             if response.status != 200:
                 raise BridgeError(f"The configured provider returned HTTP {response.status}. Check its model, credentials, limits, and JSON-mode support.", 502)
@@ -827,7 +849,7 @@ def checked_answer(data, fields, evidence, source, req):
         if not isinstance(body, str) or len(body) > 6000:
             body = ""
         body = body.strip()
-        if req["protected"] and SPOILER_ANSWER.search(body):
+        if req["protected"] and (SPOILER_ANSWER.search(body) or PAPER_DISCLOSURE.search(body)):
             body = ""
         if key == "followup" and item.get("scope") == "background":
             required = False
@@ -880,7 +902,7 @@ class Application:
             req["_progress"] = progress
         if req["protected"] and PROOF_REQUEST.search(req["question"]):
             raise BridgeError("Independent-research mode protects that proof or solution. Change the paper's protection setting to request it explicitly.", 422)
-        if not req["requests"] or (self.cfg.provider == "openai" and not req["budget"]):
+        if not req["requests"] or (self.cfg.provider in {"openai", "gemini"} and not req["budget"]):
             raise BridgeError("The configured daily provider allowance is zero.", 429)
         day_now = datetime.now(timezone.utc).date().isoformat()
         with closing(sqlite3.connect(self.ledger.path)) as db:

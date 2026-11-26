@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         arXiv Discovery
 // @namespace    https://github.com/sodium-qed/arXiv-scroller
-// @version      1.2.0
+// @version      1.2.4
 // @description  A finite daily mathematics selection, reversible local recommendations, and optional paper explanations. Adds to arXiv without replacing its interface.
 // @author       sodium-qed
 // @homepageURL  https://github.com/sodium-qed/arXiv-scroller
@@ -1251,7 +1251,7 @@ function mergedSettings(raw = {}, portable = false) {
   check(!model || /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(model), 'AI model');
   const token = portable ? '' : str(a.token, 'bridge pairing token', 256);
   check(!token || /^[a-zA-Z0-9_-]{32,256}$/.test(token), 'bridge pairing token');
-  result.ai = {url: bridge.origin, provider: choice(a.provider, ['local', 'openai'], 'AI provider'), model, token,
+  result.ai = {url: bridge.origin, provider: choice(a.provider, ['local', 'openai', 'gemini'], 'AI provider'), model, token,
     enabled: portable ? false : bool(a.enabled, 'AI enabled flag'), consent: portable ? false : bool(a.consent, 'AI consent'),
     profile: choice(a.profile, ['quick', 'full'], 'AI reading profile'),
     timeoutSeconds: number(a.timeoutSeconds, 'AI request timeout', 60, 600, true),
@@ -2581,7 +2581,7 @@ class DiscoveryApp {
     body.append(element('h3',{},'Saved glossary'));
     const entries=Object.entries(this.state.glossary).sort((a,b)=>String(b[1].updatedAt).localeCompare(String(a[1].updatedAt)));
     if(!entries.length)body.append(element('p',{},'Highlight a term in a title, abstract, full HTML paper, or explanation, then choose Explain selection.'));
-    for(const [key,g] of entries)body.append(element('details',{class:'card'},element('summary',{},`${g.term} · ${g.status||'unfamiliar'} · ${g.visits||1} visit(s)`),element('p',{class:'answer','data-paper-id':g.paperId},mathFragment(document,g.answer)),field('Understanding',select([['unfamiliar','Unfamiliar'],['partial','Partially understood'],['understood','Understood']],g.status||'unfamiliar',async e=>{g.status=e.target.value;g.updatedAt=isoNow();await this.store.set('glossary',key,g);})),this.button('Delete term',async()=>{await this.store.remove('glossary',key);delete this.state.glossary[key];this.openKnowledge();})));
+    for(const [key,g] of entries)body.append(element('details',{class:'card'},element('summary',{},`${g.term} · ${g.status||'unfamiliar'} · ${g.visits||1} visit(s)`),element('p',{class:'answer','data-paper-id':g.paperId},mathFragment(document,g.answer,{recoverBareTex:true})),field('Understanding',select([['unfamiliar','Unfamiliar'],['partial','Partially understood'],['understood','Understood']],g.status||'unfamiliar',async e=>{g.status=e.target.value;g.updatedAt=isoNow();await this.store.set('glossary',key,g);})),this.button('Delete term',async()=>{await this.store.remove('glossary',key);delete this.state.glossary[key];this.openKnowledge();})));
   }
   async pairBridge() {
     const token=prompt('Paste the pairing token printed by your local AI bridge. This is not a hosted-provider API key. The token is stored only in Tampermonkey private storage.');
@@ -2628,8 +2628,8 @@ class DiscoveryApp {
   }
   aiSettings(body) {
     const a=this.state.settings.ai;
-    body.append(element('h3',{},'Optional AI explanations'),element('p',{class:'notice'},'AI runs only when requested. The paired local bridge retrieves this paper and sends source text, your explicit knowledge profile, the selected term or follow-up, and its surrounding explanation context to the chosen provider. Interest feedback, bookmarks, subscriptions, and browsing history are not sent. Provider keys belong in the bridge environment, never here.'));
-    const provider=select([['local','Local OpenAI-compatible model'],['openai','Hosted OpenAI API']],a.provider||'local');
+    body.append(element('h3',{},'Optional AI explanations'),element('p',{class:'notice'},'AI runs only when requested. The paired local bridge retrieves this paper and sends source text, your explicit knowledge profile, the selected term or follow-up, and its surrounding explanation context to the chosen provider. Interest feedback, bookmarks, subscriptions, and browsing history are not sent. Provider keys belong in the bridge environment, never here. Google may use free-tier Gemini prompts and responses to improve its products.'));
+    const provider=select([['local','Local OpenAI-compatible model'],['openai','Hosted OpenAI API'],['gemini','Google Gemini API']],a.provider||'local');
     const url=element('input',{type:'url',value:a.url});const model=element('input',{type:'text',value:a.model,placeholder:'Model allowed by your bridge'});
     const profile=select([['quick','Quick (local; abstract first)'],['full','Detailed (full-paper excerpts)']],a.profile||'quick');
     const timeout=element('input',{type:'number',min:60,max:600,value:a.timeoutSeconds||420});
@@ -2678,7 +2678,7 @@ class DiscoveryApp {
       if(!body.isConnected||this.inlineAI.get(paper.id)!==body)return;if(generation!==await this.store.generation()){loading.textContent='Saved data changed while this request was running. The answer was not added to the glossary.';return;}loading.remove();
       const source=element('div',{class:'source'},`${result.cached?'Cached · ':''}Source analyzed: ${result.source.kind.toUpperCase()} · `,link('Open analyzed source',result.source.url),element('p',{},result.source.note||''));
       if(result.source.citations?.length) source.append(element('div',{class:'row'},result.source.citations.map(c=>link(c.label,c.url))));
-      body.append(source,element('p',{class:'answer','data-paper-id':paper.id},mathFragment(document,result.text)));
+      body.append(source,element('p',{class:'answer','data-paper-id':paper.id},mathFragment(document,result.text,{recoverBareTex:true})));
       if(result.usage)body.append(element('p',{class:'muted'},`Reported usage: ${result.usage.inputTokens??'unknown'} input / ${result.usage.outputTokens??'unknown'} output tokens · estimated $${Number(result.usage.estimatedCostUsd||0).toFixed(4)}. Verify important mathematical claims against the linked source.`));
       if(term) {
         const key=`${paper.versionedId||paper.id}:${term.toLocaleLowerCase()}`;const old=this.state.glossary[key];const at=isoNow();
@@ -3236,6 +3236,8 @@ return {generateSelection,replaceSelectionPaper};
 // Changing the grounding protocol or response policy must invalidate old explanations.
 const PROMPT_VERSION = 1;
 const CACHE_VERSION = 2;
+// Older protected answers were generated before tighter spoiler filtering.
+const PROTECTED_CACHE_VERSION = 3;
 const ID_PATTERN = /^(?:\d{4}\.\d{4,5}|[a-z][a-z.-]*\/\d{7})$/i;
 const MODEL_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/;
 const LEVELS = new Set(['unfamiliar', 'introduced', 'developing', 'comfortable', 'proficient', 'advanced']);
@@ -3372,7 +3374,7 @@ class AIClient {
       throw new Error('Pair this browser with the local bridge using its random pairing token.');
     }
     const provider = ai.provider || 'local';
-    if (!['local', 'openai'].includes(provider) || !MODEL_PATTERN.test(ai.model || '')) {
+    if (!['local', 'openai', 'gemini'].includes(provider) || !MODEL_PATTERN.test(ai.model || '')) {
       throw new Error('Choose a provider and enter the exact model name allowed by the bridge.');
     }
     if (!paper || !ID_PATTERN.test(paper.id) || !Number.isInteger(paper.version) || paper.version < 0 || paper.version > 9999) {
@@ -3403,7 +3405,7 @@ class AIClient {
     const knowledge = profileTopics(await this.getKnowledge(), context);
     const prompt = { protocol: PROMPT_VERSION, provider, model: ai.model, profile, action, paper: metadata,
       noSpoilers, detail, term, question, context: readerContext, knowledge };
-    const stamp = await fingerprint([CACHE_VERSION, origin, prompt, limits.maxInputChars, limits.maxOutputTokens]);
+    const stamp = await fingerprint([noSpoilers ? PROTECTED_CACHE_VERSION : CACHE_VERSION, origin, prompt, limits.maxInputChars, limits.maxOutputTokens]);
     const key = 'ai:' + paper.id + ':v' + paper.version + ':' + stamp;
     if (generation !== await this.getGeneration()) throw new Error('Saved data changed while preparing this request. Please request the explanation again.');
     const pendingKey = key + ':generation:' + generation;
@@ -3417,7 +3419,7 @@ class AIClient {
       if (saved && age >= 0 && age < cacheAgeLimit) {
         try { return { ...checkResult(saved, paper), cached: true }; } catch { /* Replace invalid imported cache entries. */ }
       }
-      if (!limits.dailyRequests || (provider === 'openai' && !limits.dailyBudget)) {
+      if (!limits.dailyRequests || (provider !== 'local' && !limits.dailyBudget)) {
         throw new Error('The configured daily AI allowance is zero.');
       }
       if (generation !== await this.getGeneration()) throw new Error('Saved data changed while preparing this request. Please request the explanation again.');
@@ -3566,6 +3568,50 @@ const MAX_NODES = 1_200;
 const MAX_DEPTH = 64;
 const endOf = new Map([['$', '$'], ['$$', '$$'], ['\\(', '\\)'], ['\\[', '\\]']]);
 
+// AI output occasionally omits math delimiters despite the prompt. Recover only
+// recognizable, compact TeX commands and retain the original text as fallback.
+// This is intentionally limited to AI explanations, never raw paper content.
+const bareCommand = String.raw`\\(?:alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|pi|rho|sigma|tau|phi|varphi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Phi|Psi|Omega|mathbb|mathcal|mathbf|mathrm|mathit|mathop|overline|underline|hat|bar|vec|sqrt|frac|partial|nabla|infty|subset|subseteq|supset|supseteq|in|notin|leq|geq|neq|approx|times|cdot|to|mapsto|rightarrow|leftarrow|sum|prod|int)(?![A-Za-z])`;
+const bareArg = String.raw`\{[A-Za-z0-9+\-=_^ ]{0,80}\}`;
+const bareScript = String.raw`[_^](?:${bareArg}|[A-Za-z0-9])`;
+const bareAtom = String.raw`[A-Za-z](?:${bareScript}){0,3}`;
+const bareMacro = String.raw`${bareCommand}(?:${bareArg}){0,2}(?:${bareScript}){0,3}`;
+const bareTex = new RegExp(
+  String.raw`(?<![\w\\])(?:${bareAtom}(?:[=+*/-]${bareAtom}){0,8}[=+*/(\-]?)?${bareMacro}(?:${bareMacro}|${bareScript}|${bareAtom}|\\[!,;:]|[()+*/\-]|\d{1,12}){0,40}(?:\s+[A-Za-z](?![A-Za-z])(?=\s*[=<>]))?(?:\s*[=<>]\s*(?:[A-Za-z](?![A-Za-z])|\d{1,12}))?`, 'g');
+
+// Also recover compact scripted expressions that have no TeX commands at all.
+// Require a braced script and keep the alphabet small so ordinary prose and
+// identifiers such as snake_case remain untouched.
+const bareBracedScript = String.raw`[_^]\{[A-Za-z0-9,+*/ \-]{1,32}\}`;
+const bareScriptedExpression = new RegExp(
+  String.raw`(?<![\w\\])(?=[A-Za-z0-9|(])(?=(?:[A-Za-z0-9|()=+*/-]|${bareBracedScript}){0,60}${bareBracedScript})(?:[A-Za-z]{1,3}(?![A-Za-z])|[0-9|()=+*/-]|${bareBracedScript}){1,150}(?![\w])`, 'g');
+
+function bareMathParts(text) {
+  const parts = [];
+  let cursor = 0;
+  for (const match of text.matchAll(bareTex)) {
+    if (match.index > cursor) parts.push({text:text.slice(cursor, match.index)});
+    parts.push({text:match[0], tex:match[0], display:false});
+    cursor = match.index + match[0].length;
+    if (parts.length >= MAX_FORMULAS * 2) break;
+  }
+  if (cursor < text.length || !parts.length) parts.push({text:text.slice(cursor)});
+  return parts;
+}
+
+function bareScriptParts(text) {
+  const parts = [];
+  let cursor = 0;
+  for (const match of text.matchAll(bareScriptedExpression)) {
+    if (match.index > cursor) parts.push({text:text.slice(cursor, match.index)});
+    parts.push({text:match[0], tex:match[0], display:false});
+    cursor = match.index + match[0].length;
+    if (parts.length >= MAX_FORMULAS * 2) break;
+  }
+  if (cursor < text.length || !parts.length) parts.push({text:text.slice(cursor)});
+  return parts;
+}
+
 function escaped(text, index) {
   let start = index;
   while (start && text[start - 1] === '\\') start--;
@@ -3614,7 +3660,7 @@ const tags = new Set(('math semantics annotation mrow mi mn mo mtext mspace ms '
 const flagAttrs = new Set(('stretchy fence separator symmetric movablelimits largeop ' +
   'accent accentunder displaystyle bevelled').split(' '));
 const metricAttrs = new Set('width height depth lspace rspace minsize maxsize linethickness voffset'.split(' '));
-const metricStyles = new Set('padding paddingLeft paddingRight paddingTop paddingBottom verticalAlign width height'.split(' '));
+const metricStyles = new Set('padding paddingLeft paddingRight paddingTop paddingBottom marginLeft marginRight verticalAlign width height'.split(' '));
 const dimension = /^(?:0|[+-]?(?:\d{1,2}(?:\.\d{1,5})?|\.\d{1,5})(?:em|ex|px|pt)|100%|50%)$/;
 const plainClasses = /^(?:mathcal|tml-(?:display|prime|(?:sml|med|lrg)-pad|(?:hat|tilde)-[1-4]|jot|small)|(?:chr|wbk)-(?:sml|med|lrg|acc)(?:-acc|-vec)?)$/;
 const values = new Map([
@@ -3669,10 +3715,17 @@ function copyTree(doc, node, budget, depth = 0) {
 
 // Only insert newly created text and MathML nodes. The pinned renderer returns
 // its abstract tree. Neither the paper nor the renderer supplies live markup.
-function mathFragment(doc, value) {
+function mathFragment(doc, value, options = {}) {
   const fragment = doc.createDocumentFragment();
-  for (const part of mathParts(String(value ?? ''))) {
-    if (part.tex !== undefined) {
+  const source = String(value ?? '');
+  const parsed = mathParts(source);
+  const parts = options.recoverBareTex && source.length <= MAX_FIELD
+    ? parsed.flatMap(part => part.tex === undefined ? bareMathParts(part.text) : [part])
+      .flatMap(part => part.tex === undefined ? bareScriptParts(part.text) : [part])
+    : parsed;
+  let rendered = 0;
+  for (const part of parts) {
+    if (part.tex !== undefined && rendered++ < MAX_FORMULAS) {
       try {
         const tree = temml.__renderToMathMLTree(part.tex, {
           displayMode:part.display, annotate:true, throwOnError:true, strict:true, trust:false,

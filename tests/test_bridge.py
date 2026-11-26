@@ -184,6 +184,8 @@ class BridgeTests(unittest.TestCase):
         self.assertNotIn("results", [s[0] for s in fields])
         msgs = bridge.prompt_messages(protected, doc, evidence, fields)
         self.assertIn("protection is active", msgs[0]["content"])
+        self.assertIn("never place bare TeX commands", msgs[0]["content"])
+        self.assertIn("Preserve exact source quotations unchanged", msgs[0]["content"])
         self.assertEqual(json.loads(msgs[1]["content"])["reader_topic_levels"][0]["level"], "comfortable")
         output = completion(msgs)
         danger = json.loads(output["choices"][0]["message"]["content"])
@@ -202,6 +204,29 @@ class BridgeTests(unittest.TestCase):
         self.assertLessEqual(sum(len(p.text) for p in picked.values()), 256)
         self.assertTrue(any("locally finite graph" in p.text for p in picked.values()))
         self.assertIn("excerpts", note)
+
+    def test_protected_mode_rejects_development_details_from_sources_and_answers(self):
+        safe_sentence = "The central research question concerns convergence of a family of functions."
+        method_sentence = "Moreover, using this device, we develop a new way to prove the assertion."
+        source = bridge.Source("abstract", "https://arxiv.org/abs/2401.12345v2", "Abstract.",
+                               (bridge.Passage("Original abstract", "", safe_sentence + " " + method_sentence),))
+        protected = {**self.req, "protected": True}
+        filtered, _, evidence = bridge.prepare_evidence(protected, source)
+        self.assertTrue(any(safe_sentence in p.text for p in evidence.values()))
+        self.assertFalse(any(method_sentence in p.text for p in evidence.values()))
+        fields = bridge.answer_fields(protected)
+        sections = [
+            {"key": "summary", "text": "The paper concerns convergence of functions.",
+             "evidence": [{"ref": "S1", "quote": safe_sentence}]},
+            {"key": "question", "text": "Moreover, using this device, we develop a new way to prove the assertion.",
+             "evidence": [{"ref": "S1", "quote": safe_sentence}]},
+            {"key": "background", "text": "General background includes standard convergence theorems.", "evidence": []},
+        ]
+        response = {"choices": [{"message": {"content": json.dumps({"sections": sections})}}]}
+        answer, _ = bridge.checked_answer(response, fields, evidence, filtered, protected)
+        self.assertNotIn("we develop", answer)
+        self.assertIn("The supplied passages do not establish this.", answer)
+        self.assertIn("standard convergence theorems", answer)
 
     def test_unverified_claims_are_replaced_and_source_quotes_link_to_real_anchors(self):
         captured = []
@@ -279,6 +304,24 @@ class BridgeTests(unittest.TestCase):
             requests, cost = db.execute("SELECT requests,cost FROM daily").fetchone()
         self.assertEqual(requests, 1)
         self.assertGreater(cost, 1024 * 2 + 512 * 4)
+
+    def test_gemini_uses_its_fixed_host_and_paired_request(self):
+        env = {"ARXIV_AI_PROVIDER": "gemini", "ARXIV_AI_MODELS": "fixture-model", "ARXIV_AI_TOKEN": self.cfg.token,
+               "GEMINI_API_KEY": "offline-fixture", "ARXIV_AI_USAGE_DB": str(self.cfg.db),
+               "ARXIV_AI_INPUT_USD_PER_MILLION": "2", "ARXIV_AI_OUTPUT_USD_PER_MILLION": "3"}
+        cfg = bridge.Config.from_env(env)
+        self.raw["provider"] = "gemini"
+        req = bridge.validate_request(self.raw, cfg)
+        with patch.object(bridge.client, "HTTPSConnection") as connect:
+            conn = connect.return_value
+            conn.getresponse.return_value.status = 200
+            conn.getresponse.return_value.read.return_value = b'{"choices":[]}'
+            bridge.provider_request(cfg, req, [{"role": "user", "content": "test"}])
+            self.assertEqual(connect.call_args.args, ("generativelanguage.googleapis.com",))
+            args, kwargs = conn.request.call_args
+            self.assertEqual(args, ("POST", "/v1beta/openai/chat/completions"))
+            self.assertEqual(kwargs["headers"]["Authorization"], "Bearer offline-fixture")
+            self.assertEqual(json.loads(kwargs["body"])["max_tokens"], 512)
 
     def test_hosted_config_requires_authoritative_prices_and_does_not_inherit_an_arbitrary_endpoint(self):
         env = {"ARXIV_AI_PROVIDER": "openai", "ARXIV_AI_MODELS": "fixture-model", "ARXIV_AI_TOKEN": self.cfg.token,
@@ -387,7 +430,8 @@ class BridgeTests(unittest.TestCase):
                 self.assertEqual(path, "/v1/chat/completions")
                 self.assertIsNone(credential)
                 self.assertEqual(payload["max_tokens"], 512)
-                self.assertEqual(payload["response_format"], {"type": "json_object"})
+                self.assertEqual(payload["response_format"]["type"], "json_schema")
+                self.assertIn("sections", payload["response_format"]["json_schema"]["schema"]["required"])
                 self.assertNotIn(cfg.token, json.dumps(payload))
 
 

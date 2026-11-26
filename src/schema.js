@@ -200,7 +200,7 @@ export function mergedSettings(raw = {}, portable = false) {
   check(!model || /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(model), 'AI model');
   const token = portable ? '' : str(a.token, 'bridge pairing token', 256);
   check(!token || /^[a-zA-Z0-9_-]{32,256}$/.test(token), 'bridge pairing token');
-  result.ai = {url: bridge.origin, provider: choice(a.provider, ['local', 'openai'], 'AI provider'), model, token,
+  result.ai = {url: bridge.origin, provider: choice(a.provider, ['local', 'openai', 'gemini'], 'AI provider'), model, token,
     enabled: portable ? false : bool(a.enabled, 'AI enabled flag'), consent: portable ? false : bool(a.consent, 'AI consent'),
     profile: choice(a.profile, ['quick', 'full'], 'AI reading profile'),
     timeoutSeconds: number(a.timeoutSeconds, 'AI request timeout', 60, 600, true),

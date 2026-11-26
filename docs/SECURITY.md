@@ -1,6 +1,6 @@
 # Security and privacy
 
-The discovery feed, classifier and interest history run in the userscript. Reading a listing, rating a paper and opening an interest dashboard use local data. Loading missing publication pages makes a request to arXiv. A reader's explicit overview or dictionary request can contact a paired AI bridge after the reader enables a provider.
+Selection, recommendation training and interest history run in the userscript. Reading a listing, rating a paper and opening an interest dashboard use local data. Choosing **Open complete arXiv listing** navigates to arXiv. A reader's explicit overview or dictionary request can contact a paired AI bridge after the reader enables a provider.
 
 ## Where information goes
 
@@ -9,6 +9,7 @@ The discovery feed, classifier and interest history run in the userscript. Readi
 | Tampermonkey storage | Feedback and paper snapshots, bookmarks, reading dates, subscriptions and notes, knowledge, glossary, daily selections, cached AI answers, settings and a bridge pairing token | Private to the userscript through the manager's storage API. Settings provides selective and complete deletion. The browser profile and userscript manager are part of the trust boundary. |
 | arXiv-origin IndexedDB | Validated public metadata for a completed listing and its cache time | Website code can read and change this database. The userscript checks the listing date, identity, counts, record shape and a SHA-256 checksum kept in private manager storage before reuse. A changed or expired entry triggers the normal cache-miss path. |
 | Added page controls | The private content the reader opens, displayed in closed shadow roots. Public host elements identify the add-on and selected theme. | The userscript runs in its manager's isolated DOM sandbox. Closing a dialog removes that view. Original arXiv removes the add-on controls. |
+| Filtered native paper rows | Which original entries are visible after a reader applies a daily selection or category filter | Code already running on the arXiv page can observe row visibility. A personalized or subscription filter can therefore reveal which papers matched. The user's feedback events, model weights, follow notes and pairing token stay in private storage or memory. |
 | JSON, CSV and BibTeX downloads | User-selected personal data, including glossary answers, notes and feedback in a complete JSON backup | The browser saves ordinary, unencrypted files. Download links use detached elements. JSON exports omit pairing and disable AI authorization. |
 | Optional bridge and provider | The requested paper, selected term or question, nearby context and up to 64 topics from the explicitly maintained knowledge profile | The reader selects the destination and authorizes transmission. The bridge holds any provider key. Its SQLite ledger contains the UTC date, attempt count and estimated cost. Source caching in the bridge holds public paper text in memory. |
 
@@ -16,9 +17,9 @@ Complete browser deletion clears the userscript's personal state and public list
 
 ## Paper and backup content
 
-The parser reads text, mathematical notation and supported hyperlinks. Fetched listings are parsed in an inert template. Private panels construct DOM nodes from text and validated URLs. The bundled math renderer builds native MathML from an allowlist with trust disabled and bounded formula size and expansion. An unsupported expression retains its original delimiters and source text.
+The parser reads text, mathematical notation and supported hyperlinks. The original paper titles, links and abstracts are arXiv's own nodes. The userscript constructs inline answers and management views from text and validated URLs. The bundled math renderer builds native MathML from an allowlist with trust disabled and bounded formula size and expansion. An unsupported expression retains its original delimiters and source text.
 
-Abstract, HTML, PDF and citation links identify the expected paper on arxiv.org. An author identity link uses an arXiv author search or profile, or an ORCID identity. Papers can contain ordinary HTTP or HTTPS citations to other publishers. These links open on reader action with opener and referrer suppression. Generated explanations render as text with separately validated arXiv source links.
+In the userscript's saved-paper and explanation views, abstract, HTML, PDF and evidence links identify the expected paper on arxiv.org. An author identity link uses an arXiv author search or profile, or an ORCID identity. Stored papers can also contain ordinary HTTP or HTTPS citations to other publishers. Links built by the userscript suppress opener and referrer access when opening a new tab. Generated explanations use text and safe MathML, with separately validated arXiv evidence links.
 
 All backup collections are checked before the first private write. Validation covers nested author records, dates, identifier consistency, revisions, training windows, URL schemes, bounds, private answer provenance and historical snapshots. Structural keys that can alter object prototypes are rejected. Records are rebuilt from defined fields. Settings imported from a file always require new pairing and consent. CSV output quotes fields and prefixes formula-like cells. BibTeX output escapes TeX metacharacters in research metadata.
 

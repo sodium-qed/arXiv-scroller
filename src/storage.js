@@ -189,6 +189,43 @@ export class Store {
     });
   }
 
+  getOrCreateSelection(id, candidate, expected) {
+    const key = recordPath('selections', id);
+    return this.queue(async () => {
+      if (expected !== await this.adapter.get(GENERATION, 'initial')) return null;
+      // The read and the first write share the cross-tab lock. A second tab
+      // receives the winning draw without sending a spurious change notice.
+      const saved = await this.adapter.get(key, null);
+      if (saved !== null) return checkedRecord('selections', id, saved);
+      const first = checkedRecord('selections', id, candidate);
+      await this.adapter.set(key, first);
+      await this.changed();
+      return first;
+    });
+  }
+
+  commitSelectionRevision(id, expectedRecord, nextSelection, snapshots, generation) {
+    const key = recordPath('selections', id);
+    return this.queue(async () => {
+      if (generation !== await this.adapter.get(GENERATION, 'initial')) return null;
+      const saved = await this.adapter.get(key, null);
+      if (saved === null || !expectedRecord) return null;
+      const latest = checkedRecord('selections', id, saved);
+      const base = checkedRecord('selections', id, expectedRecord);
+      // Both draws now have the schema's canonical field order. Comparing the
+      // content also catches independently restored draws with equal counts.
+      if (latest.revisions.length !== base.revisions.length ||
+          JSON.stringify(latest.current) !== JSON.stringify(base.current)) return null;
+      const updated = checkedRecord('selections', id, {
+        ...latest, current:nextSelection, revisions:[...latest.revisions, latest.current],
+        paperSnapshots:{...latest.paperSnapshots, ...snapshots}
+      });
+      await this.adapter.set(key, updated);
+      await this.changed();
+      return updated;
+    });
+  }
+
   async removeMany(keys) {
     const tx = {kind: 'remove', keys};
     await this.adapter.set(JOURNAL, tx);

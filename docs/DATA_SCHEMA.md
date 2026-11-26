@@ -14,12 +14,14 @@ The portable JSON envelope contains `format` equal to `arxiv-discovery`, numeric
 | `subscriptions` | Array of unique `id` values | Author name, identity URL, optional stable identifier, creation time, private notes and explicit name-only confirmation. |
 | `knowledge` | Topic text | Current level and update time, with an optional chronological list of explicit level changes. |
 | `glossary` | Versioned paper ID and normalized selected term | Original term, paper ID, contextual answer, optional source, understanding status, visit count, last update and optional visit timestamps. |
-| `selections` | Announcement date, mode and eligibility settings | Original and current draws, prior revisions, creation time and optional paper snapshots for archived cards. |
+| `selections` | Announcement date, mode, eligibility settings and listing archive | Original and current draws, prior revisions, creation time and optional paper snapshots for history and source links. Earlier records can have a key without an archive. |
 | `explanations` | Paper ID, version and SHA-256 request fingerprint | Text, source kind and URL, disclosure, citations, saved time and optional reported usage. |
 
 Papers use modern or legacy arXiv identifiers. A known version is a positive integer. Zero denotes an unknown version, so its versioned display identifier remains the bare ID. Standalone abstract and HTML pages can have a null announcement date or section. A dated listing records `new`, `cross` or `replacement`. Optional inline hyperlinks give UTF-16 start and end offsets into the corresponding text field. Link targets are validated independently of linked text.
 
-Each draw records its date, mode, seed, unique paper entries and missing categories with reasons. An entry includes its paper, assigned category if applicable, explanation and an optional probability. Null represents an unavailable probability. The original draw stays available when regenerating or replacing one paper.
+Each draw records its date, mode, seed, unique paper entries and missing categories with reasons. An entry includes its paper, assigned category if applicable, explanation and an optional probability. Null represents an unavailable probability. The original draw stays available when regenerating or replacing one paper. Distinguishing listing archives gives the overall mathematics listing and subject-specific listings separate saved draws on the same date.
+
+The 1.0 release stored daily selections without their listing archive. Those records remain available under **Previous daily selections**, including their original draws and revisions. Version 1.1 creates a fresh first draw for each archive-specific key. Simultaneous first requests share the first saved draw. Reopening that draw reads the existing record without issuing a change notification to other tabs. An edit checks the current draw and revision count under the same lock before appending to the saved history. A reader whose tab holds an older revision can reopen the current selection and retry the change.
 
 ## Revisions and learning
 

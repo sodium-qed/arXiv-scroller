@@ -171,19 +171,23 @@ export class AIClient {
     const stamp = await fingerprint([CACHE_VERSION, origin, prompt, limits.maxInputChars, limits.maxOutputTokens]);
     const key = 'ai:' + paper.id + ':v' + paper.version + ':' + stamp;
     if (generation !== await this.getGeneration()) throw new Error('Saved data changed while preparing this request. Please request the explanation again.');
-    const saved = await this.cacheGet(key);
-    const age = Date.now() - saved?.savedAt;
-    const cacheAgeLimit = !paper.version ? MAX_UNKNOWN_VERSION_AGE : saved?.source?.kind === 'abstract' ? 86400000 : Infinity;
-    if (saved && age >= 0 && age < cacheAgeLimit) {
-      try { return { ...checkResult(saved, paper), cached: true }; } catch { /* Replace invalid imported cache entries. */ }
-    }
     const pendingKey = key + ':generation:' + generation;
     if (this.pending.has(pendingKey)) return this.pending.get(pendingKey);
-    if (!limits.dailyRequests || (provider === 'openai' && !limits.dailyBudget)) {
-      throw new Error('The configured daily AI allowance is zero.');
-    }
-    if (generation !== await this.getGeneration()) throw new Error('Saved data changed while preparing this request. Please request the explanation again.');
-    const work = this.send(origin, ai.token, { ...prompt, limits, progress: provider === "local" }, key, generation, timeout, options.onProgress);
+    // Claim the key before awaiting cache access or another generation check.
+    // Otherwise two simultaneous cache misses can both start inference.
+    const work = (async () => {
+      const saved = await this.cacheGet(key);
+      const age = Date.now() - saved?.savedAt;
+      const cacheAgeLimit = !paper.version ? MAX_UNKNOWN_VERSION_AGE : saved?.source?.kind === 'abstract' ? 86400000 : Infinity;
+      if (saved && age >= 0 && age < cacheAgeLimit) {
+        try { return { ...checkResult(saved, paper), cached: true }; } catch { /* Replace invalid imported cache entries. */ }
+      }
+      if (!limits.dailyRequests || (provider === 'openai' && !limits.dailyBudget)) {
+        throw new Error('The configured daily AI allowance is zero.');
+      }
+      if (generation !== await this.getGeneration()) throw new Error('Saved data changed while preparing this request. Please request the explanation again.');
+      return this.send(origin, ai.token, { ...prompt, limits, progress: provider === "local" }, key, generation, timeout, options.onProgress);
+    })();
     this.pending.set(pendingKey, work);
     try { return await work; } finally { this.pending.delete(pendingKey); }
   }

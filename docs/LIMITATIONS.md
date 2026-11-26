@@ -14,7 +14,7 @@
 - Category feedback reflects the papers the reader chose to review. The displayed interval measures sampling uncertainty for the observed like share. It cannot correct self-selection or establish the reader's mathematical ability. Cross-classified papers can count toward multiple category rows.
 - Discovery uses manual reads and eligible ratings as local evidence of prior encounters. It can estimate familiarity with topics and researcher labels in those records. Activity outside this installation supplies no such evidence.
 - The native title, abstract and full paper use arXiv's rendering settings. In inline AI answers and the saved glossary, the bundled TeX renderer handles common inline and display mathematics using installed math fonts. Unknown author macros, specialized layouts, deliberately oversized expressions and unmatched delimiters retain their source.
-- The contextual dictionary operates on selectable text in the supported listing, abstract, HTML paper and explanation views. Browser PDF viewers, scanned images and individual symbols without selectable text can require opening the HTML or abstract view.
+- Paper shortcuts and the contextual dictionary require **Enable paper tools** in the upper-right **Settings**. The dictionary operates on selectable text in the supported listing, abstract, HTML paper and explanation views. Browser PDF viewers, scanned images and individual symbols without selectable text can require opening the HTML or abstract view.
 
 ## AI and personal data
 

@@ -63,7 +63,10 @@ export class DiscoveryApp {
     }
     if(this.state.settings.mode!=='original') await this.mount();
   }
-  retrain() {this.model=trainModel(this.state.events,this.state.settings);}
+  retrain() {
+    this.model=trainModel(this.state.events,this.state.settings);
+    this.latestFeedback=new Map(activeFeedback(this.state.events,this.state.settings).latest.map(event=>[event.paperId,event]));
+  }
   async reload() {
     this.state=await this.store.load();
     // Current-page public metadata stays usable after erasure, without silently
@@ -71,12 +74,13 @@ export class DiscoveryApp {
     for(const paper of this.listing?.papers||[this.article].filter(Boolean))if(!this.state.papers[paper.id])this.state.papers[paper.id]=paper;
     this.retrain();this.updateStatus();
     for(const root of this.roots)for(const row of root.querySelectorAll('.actions[data-paper-id]')){const paper=this.state.papers[row.dataset.paperId];if(paper)row.replaceWith(this.paperActions(paper,row._entry));else row.remove();}
+    this.refreshPaperSettings();
   }
   async rememberPaper(paper) {await this.store.cachePapers([paper]);this.state.papers[paper.id]=paper;}
   async refreshExternal() {
     this.closePanel();this.clearInlineAI();this.showAllPapers();await this.reload();
     if(this.state.settings.mode==='original')this.unmount();
-    else if(this.mounted){this.syncPaperTools();this.notify('Changes from another arXiv tab have been loaded.');}
+    else{await this.mount();this.syncPaperTools();this.notify('Changes from another arXiv tab have been loaded.');}
   }
   rootHost(id,parent,before=null) {
     const host=element('div',{id,'data-arxiv-discovery':'true','data-theme':this.state.settings.theme});
@@ -92,14 +96,27 @@ export class DiscoveryApp {
     // management dialogs and contextual dictionary popovers.
     const {host,root}=this.rootHost('arxiv-discovery-dialogs',document.body);
     this.uiHost=host;this.root=root;this.mounted=true;
-    if(this.state.settings.mode!=='original'&&this.state.settings.showTools)this.attachPaperTools();
+    this.syncSettingsLauncher();
+    if(this.toolsEnabled())this.attachPaperTools();
     document.addEventListener('mouseup',this.selectionHandler);
     document.addEventListener('keydown',this.keyHandler);
     this.updateStatus();
   }
+  syncSettingsLauncher() {
+    if(!this.mounted)return;
+    if(this.state.settings.mode==='original'){
+      this.removeHost(this.settingsHost);this.settingsHost=null;this.settingsButton=null;return;
+    }
+    if(this.settingsHost?.isConnected)return;
+    const target=document.querySelector('#dlpage')||document.querySelector('#content-inner')||document.querySelector('.ltx_document')||document.querySelector('main')||document.body;
+    const launcher=this.rootHost('arxiv-discovery-settings',target,target.firstChild);
+    this.settingsHost=launcher.host;
+    this.settingsButton=element('button',{type:'button',class:'settings-launcher','aria-label':'Discovery settings','aria-haspopup':'dialog',onclick:event=>{if(event.isTrusted)this.openSettings();}},'Settings');
+    launcher.root.append(this.settingsButton);
+  }
   async show() {
     if(this.state.settings.mode==='original'||!this.state.settings.showTools)this.state.settings=await this.store.settings({mode:this.state.settings.mode==='original'?this.state.settings.previousMode||'random':this.state.settings.mode,showTools:true});
-    await this.mount();this.attachPaperTools();
+    await this.mount();this.syncPaperTools();
   }
   async hide() {
     this.unmount();
@@ -107,7 +124,7 @@ export class DiscoveryApp {
   }
   unmount() {
     this.showAllPapers();this.closePanel();this.clearInlineAI();
-    for(const host of this.hosts)host.remove();this.hosts=[];this.roots=[];this.paperTools.clear();this.uiHost=null;this.root=null;this.mounted=false;
+    for(const host of this.hosts)host.remove();this.hosts=[];this.roots=[];this.paperTools.clear();this.uiHost=null;this.root=null;this.settingsHost=null;this.settingsButton=null;this.mounted=false;
     document.removeEventListener('mouseup',this.selectionHandler);document.removeEventListener('keydown',this.keyHandler);
   }
   updateStatus(message='') {
@@ -119,15 +136,23 @@ export class DiscoveryApp {
     const root=previous?.host?.isConnected&&previous!==this.root?previous:this.listRoot||this.paperTools.values().next().value?.root;
     let notice=this.dialog?.open?this.panelNotice:root?.querySelector('.inline-notice');
     if(!notice&&root){notice=element('p',{class:'inline-notice',role:'status','aria-live':'polite'});(root.querySelector('.tools')||root).append(notice);}
-    if(notice){notice.textContent=text;notice.hidden=false;const disclosure=notice.closest('details.tools');if(disclosure)disclosure.open=true;}
+    if(notice){notice.textContent=text;notice.hidden=false;}
     else console.info(`arXiv Discovery: ${text}`);
   }
   button(text,callback,attrs={}) {
     return element('button',{type:'button',...attrs,onclick:async e=>{if(!e.isTrusted)return;const b=e.currentTarget;this.lastActionRoot=b.getRootNode();b.disabled=true;try{await callback(e);}catch(error){this.notify(error.message||String(error));}finally{if(b.isConnected)b.disabled=false;}}},text);
   }
-  closePanel() {this.currentPanel=null;this.selectionBubble?.remove();this.selectionBubble=null;if(this.dialog){if(this.dialog.open)this.dialog.close();this.dialog.remove();this.dialog=null;this.body=null;this.panelNotice=null;}}
+  closePanel() {
+    this.currentPanel=null;this.selectionBubble?.remove();this.selectionBubble=null;
+    if(this.dialog){
+      if(this.dialog.open)this.dialog.close();this.dialog.remove();this.dialog=null;this.body=null;this.panelNotice=null;
+      const target=this.panelFocus?.isConnected&&!this.panelFocus.disabled?this.panelFocus:this.settingsButton;
+      target?.focus({preventScroll:true});this.panelFocus=null;
+    }
+  }
   panel(title,name) {
-    this.closePanel();this.currentPanel=name;
+    const focused=this.roots.map(root=>root.activeElement).find(Boolean)||document.activeElement;
+    this.closePanel();this.panelFocus=focused;this.currentPanel=name;
     const dialog=element('dialog',{'aria-label':title});
     const close=this.button('Close',()=>this.closePanel(),{'aria-label':`Close ${title}`});
     const body=element('div',{class:'dialog-body'});this.panelNotice=element('p',{role:'status','aria-live':'polite',class:'notice',hidden:true});
@@ -148,18 +173,54 @@ export class DiscoveryApp {
   }
   addPaperTools(id,parent,before=null) {
     const {host,root}=this.rootHost(`ad-paper-${id.replace(/[^\w-]/g,'-')}`,parent,before);
-    const detail=element('details',{class:'tools','data-paper-id':id},element('summary',{},'Discovery tools'));
-    const tools={host,root,detail,ready:false};this.paperTools.set(id,tools);
-    detail.addEventListener('toggle',()=>{if(detail.open)this.expandPaperTools(id);});root.append(detail);return tools;
+    const body=element('div',{class:'tools','data-paper-id':id,role:'group','aria-label':'Paper tools'});
+    const tools={host,root,body};this.paperTools.set(id,tools);root.append(body);
+    const paper=this.state.papers[id];
+    body.append(this.paperActions(paper,this.selectionEntry(id)),this.authorControls(paper),this.paperProtection(paper),this.moreTools());return tools;
   }
-  expandPaperTools(id) {
-    const tools=this.paperTools.get(id);if(!tools||tools.ready)return tools;
-    const paper=this.state.papers[id];if(!paper)return tools;
-    tools.ready=true;tools.detail.append(this.paperActions(paper,this.selectionEntry(id)),this.authorControls(paper),this.paperProtection(paper),this.moreTools());return tools;
-  }
+  toolsEnabled() {return this.state.settings.mode!=='original'&&this.state.settings.showTools;}
   syncPaperTools() {
-    if(this.state.settings.mode!=='original'&&this.state.settings.showTools){this.attachPaperTools();return;}
-    this.clearInlineAI();for(const {host} of this.paperTools.values())this.removeHost(host);this.paperTools.clear();
+    if(!this.mounted)return;
+    this.syncSettingsLauncher();
+    if(this.toolsEnabled()){this.attachPaperTools();return;}
+    this.showAllPapers();this.clearInlineAI();for(const {host} of this.paperTools.values())this.removeHost(host);this.paperTools.clear();
+  }
+  async setToolsEnabled(enabled) {
+    ++this.viewEpoch;
+    const patch={showTools:enabled};
+    if(enabled&&this.state.settings.mode==='original')patch.mode=this.state.settings.previousMode||'random';
+    this.state.settings=await this.store.settings(patch);this.syncPaperTools();
+  }
+  modePicker() {
+    const selected=()=>this.state.settings.mode==='original'?this.state.settings.previousMode||'random':this.state.settings.mode;
+    let pending=null;
+    const picker=select(MODES,selected(),async event=>{
+      if(!event.isTrusted)return;
+      if(pending!==null){picker.value=pending;return;}
+      const next=picker.value;pending=next;picker.setAttribute('aria-busy','true');
+      const epoch=this.viewEpoch,wasDaily=['daily','preparing'].includes(this.listView);let write=null;
+      try {
+        write=this.store.settings(this.state.settings.mode==='original'?{previousMode:next}:{mode:next});this.modeWrite=write;
+        this.state.settings=await write;this.retrain();
+        if(wasDaily&&this.mounted&&this.toolsEnabled()&&epoch===this.viewEpoch&&['daily','preparing'].includes(this.listView)){
+          const request=++this.viewEpoch,record=await this.ensureSelection(false,request);
+          if(request!==this.viewEpoch||!this.mounted)return;
+          if(record){
+            const keepFocus=picker.getRootNode().activeElement===picker;
+            this.renderDaily();
+            if(keepFocus&&!picker.isConnected&&!this.dialog?.open){const options=this.listRoot.querySelector('.selection-options');options.open=true;options.querySelector('select')?.focus({preventScroll:true});}
+          }else{this.showAllPapers();this.notify('The saved selection is unavailable on this page. Choose Daily selection to try again.');}
+        }
+      } catch(error){this.notify(error.message||String(error));}
+      finally{if(this.modeWrite===write)this.modeWrite=null;pending=null;if(picker.isConnected){picker.value=selected();picker.removeAttribute('aria-busy');}}
+    });return picker;
+  }
+  refreshPaperSettings({authors=true,spoilers=true}={}) {
+    for(const [id,tools] of this.paperTools){
+      const paper=this.state.papers[id];if(!paper)continue;
+      if(authors)tools.root.querySelector('.authors')?.replaceWith(this.authorControls(paper));
+      if(spoilers)for(const input of tools.root.querySelectorAll('.paper-protection input'))input.checked=this.noSpoilers(paper);
+    }
   }
   removeHost(host) {if(!host)return;host.remove();this.hosts=this.hosts.filter(h=>h!==host);this.roots=this.roots.filter(r=>r.host!==host);}
   clearInlineAI() {for(const body of this.inlineAI.values())body.remove();this.inlineAI.clear();this.selectionBubble?.remove();this.selectionBubble=null;}
@@ -170,7 +231,7 @@ export class DiscoveryApp {
     return element('details',{class:'more-tools'},element('summary',{},'More tools'),row);
   }
   selectionEntry(id) {return this.listView==='daily'?this.activeSelection?.current.entries.find(entry=>entry.paperId===id)||null:null;}
-  currentFeedback(paper) {return activeFeedback(this.state.events,this.state.settings).latest.find(e=>e.paperId===paper.id);}
+  currentFeedback(paper) {return this.latestFeedback.get(paper.id);}
   paperActions(paper,entry=null) {
     const row=element('div',{class:'actions','data-paper-id':paper.id});
     const latest=this.currentFeedback(paper);
@@ -181,26 +242,27 @@ export class DiscoveryApp {
       this.state.events.push(e);this.retrain();this.refreshActionRows(paper);this.updateStatus();
       if(this.progress) this.updateProgress();
     };
-    row.append(this.button('Like',()=>rate('like'),{'aria-pressed':latest?.value==='like'}),
-      this.button('Dislike',()=>rate('dislike'),{'aria-pressed':latest?.value==='dislike'}),
-      this.button('Need background',()=>rate('background'),{'aria-pressed':latest?.value==='background'}),
+    row.append(this.button('Like',()=>rate('like'),{'aria-pressed':String(latest?.value==='like')}),
+      this.button('Dislike',()=>rate('dislike'),{'aria-pressed':String(latest?.value==='dislike')}),
+      this.button('Need background',()=>rate('background'),{'aria-pressed':String(latest?.value==='background')}),
       this.button('Skip',()=>rate('neutral')),this.button('Clear feedback',()=>rate('removed')),reason,
       this.button(this.state.bookmarks[paper.id]?'Bookmarked':'Bookmark',async()=>{
         if(this.state.bookmarks[paper.id]){await this.store.remove('bookmarks',paper.id);delete this.state.bookmarks[paper.id];}
         else {await this.rememberPaper(paper);this.state.bookmarks[paper.id]=isoNow();await this.store.set('bookmarks',paper.id,this.state.bookmarks[paper.id]);}
         this.refreshActionRows(paper);
-      },{'aria-pressed':!!this.state.bookmarks[paper.id]}),
+      },{'aria-pressed':String(!!this.state.bookmarks[paper.id])}),
       this.button(this.state.reading[paper.id]?'Read':'Mark as read',async()=>{
         if(this.state.reading[paper.id]){await this.store.remove('reading',paper.id);delete this.state.reading[paper.id];}
         else {await this.rememberPaper(paper);this.state.reading[paper.id]=isoNow();await this.store.set('reading',paper.id,this.state.reading[paper.id]);}
         this.refreshActionRows(paper);this.updateProgress();
-      },{'aria-pressed':!!this.state.reading[paper.id]}),this.button('AI overview',()=>this.openAI(paper)));
+      },{'aria-pressed':String(!!this.state.reading[paper.id])}),this.button('AI overview',()=>this.openAI(paper)));
     row._paper=paper;row._entry=entry;
     reason.addEventListener('change',async()=>{const f=this.currentFeedback(paper);if(f&&!['removed','neutral'].includes(f.value)){try{await rate(f.value);}catch(e){this.notify(e.message);}}});
     return row;
   }
   refreshActionRows(paper) {
-    for(const root of this.roots) for(const row of root.querySelectorAll('.actions[data-paper-id]')) if(row.dataset.paperId===paper.id) row.replaceWith(this.paperActions(paper,row._entry));
+    const row=this.paperTools.get(paper.id)?.root.querySelector('.actions[data-paper-id]');
+    if(row)row.replaceWith(this.paperActions(paper,row._entry));
   }
   authorControls(paper) {
     const row=element('div',{class:'authors'},'Authors: ');
@@ -214,13 +276,15 @@ export class DiscoveryApp {
     const existing=this.state.subscriptions.find(s=>subscriptionMatches(author,s));if(existing){this.openAuthors();return;}
     if(!author.stableId&&!confirm(`No stable author identifier is available for ${author.name}. A name-only subscription may include different researchers with the same name. Follow these as possible matches and verify each author's page?`)) return;
     const sub={id:makeId(),name:author.name,url:author.url||'',stableId:author.stableId||null,createdAt:isoNow(),notes:'',confirmedNameOnly:!author.stableId};
-    await this.store.set('subscriptions',sub.id,sub);this.state.subscriptions.push(sub);this.notify(`Following ${author.name}${sub.stableId?'':' as a name-only match; verify identity'}.`);
+    await this.store.set('subscriptions',sub.id,sub);this.state.subscriptions.push(sub);this.refreshPaperSettings({spoilers:false});this.notify(`Following ${author.name}${sub.stableId?'':' as a name-only match; verify identity'}.`);
   }
   noSpoilers(paper) {return this.state.settings.paperSpoilers[paper.id]??this.state.settings.noSpoilers;}
   paperProtection(paper) {
-    return checkbox('No Spoilers for this paper',this.noSpoilers(paper),async e=>{
+    const control=checkbox('No Spoilers for this paper',this.noSpoilers(paper),async e=>{
       this.state.settings=await this.store.settings({paperSpoilers:{[paper.id]:e.target.checked}});
+      this.refreshPaperSettings({authors:false});
     });
+    control.classList.add('paper-protection');return control;
   }
   paperReference(paper,entry=null) {
     const item=element('li',{class:'paper-reference'},link(mathFragment(document,paper.title),paper.links.abstract),
@@ -257,9 +321,8 @@ export class DiscoveryApp {
   }
   updateProgress() {
     if(!this.progress||!this.activeSelection) return;
-    const entries=this.activeSelection.current.entries;const latest=activeFeedback(this.state.events,{...this.state.settings,history:{mode:'all'},resetAt:null}).latest;
-    const reviewed=new Set(latest.filter(e=>e.value!=='removed').map(e=>e.paperId));
-    const count=entries.filter(e=>this.state.reading[e.paperId]||reviewed.has(e.paperId)).length;
+    const entries=this.activeSelection.current.entries;
+    const count=entries.filter(e=>{const event=this.latestFeedback.get(e.paperId);return this.state.reading[e.paperId]||event&&event.value!=='removed';}).length;
     this.progress.textContent=`${count} / ${entries.length} papers reviewed · ${entries.length} selected from ${this.listing.papers.length} entries · ${this.listing.announcementDate}`;
   }
   showAllPapers() {
@@ -287,12 +350,13 @@ export class DiscoveryApp {
     here.searchParams.set('skip','0');here.searchParams.set('show',String(Math.min(2000,Math.max(25,this.listing?.advertisedTotal||2000))));here.hash='';return here.href;
   }
   async openDaily(regenerate=false) {
-    if(!this.mounted)return;
+    const waiting=this.viewEpoch;if(this.modeWrite){await this.modeWrite;if(waiting!==this.viewEpoch)return;}
+    if(!this.mounted||!this.toolsEnabled())return;
     this.closePanel();this.showAllPapers();const epoch=this.viewEpoch;
     const root=this.listingControls();
     if(!root||!this.listing?.announcementDate) {
-      const tools=this.currentPaper&&this.expandPaperTools(this.currentPaper.id)||this.paperTools.values().next().value;
-      if(tools){tools.detail.open=true;tools.detail.append(element('p',{class:'inline-notice'},'Open a dated mathematics listing to select papers. ',link('New mathematics listing','https://arxiv.org/list/math/new')));}return;
+      const tools=this.paperTools.get(this.currentPaper?.id)||this.paperTools.values().next().value;
+      if(tools)tools.body.append(element('p',{class:'inline-notice'},'Open a dated mathematics listing to select papers. ',link('New mathematics listing','https://arxiv.org/list/math/new')));return;
     }
     root.append(element('p',{class:'listing-status',role:'status'},'Preparing the daily selection…'),this.button('Show all papers',()=>this.showAllPapers()));
     if(!this.listing.complete) {
@@ -300,7 +364,7 @@ export class DiscoveryApp {
       const target=link('Open complete arXiv listing',this.completeListingLink());target.removeAttribute('target');root.append(' · ',target,
         element('details',{},element('summary',{},'Why sampling is unavailable'),element('p',{},'A selection requires every paper in the publication on the native page. If arXiv still paginates the complete view, sampling remains unavailable; ordinary paper tools continue to work.'),element('ul',{},this.listing.warnings.map(w=>element('li',{},w)))));return;
     }
-    const record=await this.ensureSelection(regenerate,epoch);
+    this.listView='preparing';const record=await this.ensureSelection(regenerate,epoch);
     if(epoch!==this.viewEpoch||!root.host.isConnected)return;
     if(!record){root.querySelector('.listing-status').textContent='The saved selection cannot be applied to this page. All original entries remain visible. You can generate a new selection from this complete listing.';root.append(this.button('Regenerate daily selection',()=>this.openDaily(true)));return;}
     this.renderDaily();
@@ -313,10 +377,7 @@ export class DiscoveryApp {
     this.progress=element('span',{class:'listing-status',role:'status','aria-live':'polite'});
     root.append(element('p',{class:'listing-summary'},this.progress,' · ',this.button('Show all papers',()=>this.showAllPapers())));this.updateProgress();
     const options=element('details',{class:'selection-options'},element('summary',{},'Selection options'));
-    options.append(field('Recommendation mode',select(MODES,this.state.settings.mode,async e=>{
-      const next=e.target.value;this.showAllPapers();const epoch=this.viewEpoch;
-      this.state.settings=await this.store.settings({mode:next});if(!this.mounted||epoch!==this.viewEpoch)return;this.retrain();await this.openDaily();
-    })),element('div',{class:'more-actions'},this.button('Regenerate daily selection',()=>this.openDaily(true)),
+    options.append(field('Recommendation mode',this.modePicker()),element('div',{class:'more-actions'},this.button('Regenerate daily selection',()=>this.openDaily(true)),
       this.button('Restore original selection',()=>this.saveSelectionRevision(record.original)),this.button('Previous selections',()=>this.openPrevious()),this.button('All papers in a category',()=>this.openCategory()),this.button('Settings',()=>this.openSettings())),
       element('p',{class:'muted'},`Eligibility: new submissions${this.state.settings.includeCross?', cross-submissions':''}${this.state.settings.includeReplacements?', replacements':''}. Saved choices stay pinned; opening the page itself always shows all native entries.`),
       element('p',{class:'muted'},'Alt+J / Alt+K next / previous · Alt+L like · Alt+D dislike · Alt+B bookmark · Alt+R read.'));
@@ -328,11 +389,11 @@ export class DiscoveryApp {
       const tools=this.paperTools.get(entry.paperId);if(!tools)continue;
       const note=element('div',{class:'selection-note'},element('span',{},`Daily selection${entry.category?` · ${entry.category}`:''} · `),this.button('Replace this paper',()=>this.replacePaper(entry.paperId)),
         element('details',{},element('summary',{},'Why this paper?'),element('p',{},entry.reason||'Chosen for this daily selection.')));
-      tools.root.insertBefore(note,tools.detail);
+      tools.root.insertBefore(note,tools.body);
       for(const row of tools.root.querySelectorAll('.actions[data-paper-id]'))row.replaceWith(this.paperActions(row._paper,entry));
     }
     const visible=this.nativeListing.visibleIds();
-    if(this.currentPaper&&!visible.includes(this.currentPaper.id)){this.currentPaper=null;this.listRoot.querySelector('button')?.focus({preventScroll:true});}
+    if(this.currentPaper&&!visible.includes(this.currentPaper.id)){this.currentPaper=null;if(!this.dialog?.open)this.listRoot.querySelector('button')?.focus({preventScroll:true});}
   }
   async saveSelectionRevision(next,focusId=null) {
     const epoch=this.viewEpoch,key=this.activeSelectionKey,record=this.activeSelection,generation=await this.store.generation();
@@ -406,7 +467,7 @@ export class DiscoveryApp {
       const notes=element('textarea',{maxlength:2000},sub.notes||'');
       const section=element('section',{class:'card'},element('h3',{},sub.name),element('p',{class:'muted'},`${sub.stableId?`Stable identifier: ${sub.stableId}`:'Name-only subscription: verify identity'} · Followed ${fmtDate(sub.createdAt)} · ${matches.filter(p=>!this.state.reading[p.id]).length} unread`),
         sub.url?link('Check author identity and publications',sub.url):null,field('Private notes',notes),this.button('Save notes',async()=>{sub.notes=notes.value;await this.store.set('subscriptions',sub.id,sub);this.notify('Author notes saved.');}),
-        this.button('Unfollow',async()=>{await this.store.remove('subscriptions',sub.id);this.state.subscriptions=this.state.subscriptions.filter(s=>s.id!==sub.id);this.openAuthors();}),
+        this.button('Unfollow',async()=>{await this.store.remove('subscriptions',sub.id);this.state.subscriptions=this.state.subscriptions.filter(s=>s.id!==sub.id);this.refreshPaperSettings({spoilers:false});this.openAuthors();}),
         element('details',{},element('summary',{},`${matches.length} locally known publications`),element('ul',{},matches.map(p=>element('li',{},`${this.state.reading[p.id]?'Read':'Unread'} · ${fmtDate(p.announcementDate)} · `,link(p.title,p.links.abstract))))));
       body.append(section);
     }
@@ -482,13 +543,23 @@ export class DiscoveryApp {
   }
   openSettings() {
     const body=this.panel('Discovery settings','settings');const s=this.state.settings;
+    const daily=this.button('Show daily selection',()=>this.openDaily(),{disabled:!this.toolsEnabled()});
+    let pendingEnable=null;
+    const enabled=checkbox('Enable paper tools',this.toolsEnabled(),async event=>{
+      if(!event.isTrusted)return;const input=event.currentTarget;
+      if(pendingEnable!==null){input.checked=pendingEnable;return;}
+      pendingEnable=input.checked;input.setAttribute('aria-busy','true');
+      try{await this.setToolsEnabled(input.checked);daily.disabled=!this.toolsEnabled();}
+      catch(error){input.checked=this.toolsEnabled();this.notify(error.message||String(error));}
+      finally{pendingEnable=null;if(input.isConnected)input.removeAttribute('aria-busy');}
+    });
+    body.append(enabled,field('Recommendation mode',this.modePicker()),daily);
     if(this.state.storageWarnings?.length)body.append(element('div',{class:'notice'},'Some saved records could not be loaded:',element('ul',{},this.state.storageWarnings.map(w=>element('li',{},w)))));
     body.append(element('h3',{},'Discovery'),checkbox('Include cross-submissions',s.includeCross,async e=>{this.showAllPapers();this.state.settings=await this.store.settings({includeCross:e.target.checked});}),
       checkbox('Include replacement submissions',s.includeReplacements,async e=>{this.showAllPapers();this.state.settings=await this.store.settings({includeReplacements:e.target.checked});}),
       checkbox('Allow feedback collected in Pure Random mode to train future recommendations',s.trainRandom,async e=>{this.state.settings=await this.store.settings({trainRandom:e.target.checked});this.retrain();this.updateStatus();}),
       checkbox('Use explicit author subscriptions as recommendation signals',s.useSubscriptions,async e=>{this.state.settings=await this.store.settings({useSubscriptions:e.target.checked});}),
-      checkbox('Show expandable discovery tools below each paper',s.showTools,async e=>{this.state.settings=await this.store.settings({showTools:e.target.checked});this.syncPaperTools();}),
-      checkbox('No Spoilers by default',s.noSpoilers,async e=>{this.state.settings=await this.store.settings({noSpoilers:e.target.checked});}),
+      checkbox('No Spoilers by default',s.noSpoilers,async e=>{this.state.settings=await this.store.settings({noSpoilers:e.target.checked});this.refreshPaperSettings({authors:false});}),
       field('Add-on color theme',select([['auto','System'],['light','Light'],['dark','Dark']],s.theme,async e=>{this.state.settings=await this.store.settings({theme:e.target.value});this.updateStatus();}),'Applies only to added controls and panels.'));
     const explore=element('input',{type:'number',min:0,max:100,step:5,value:Math.round(s.exploration*100)});const count=element('input',{type:'number',min:1,max:32,value:s.personalizedCount});
     body.append(element('div',{class:'row'},field('Balanced-mode random exploration (%)',explore),field('Personalized selection size',count),this.button('Save sampling settings',async()=>{const x=Number(explore.value),n=Number(count.value);if(!Number.isFinite(x)||x<0||x>100||!Number.isInteger(n)||n<1||n>32)throw new Error('Use 0–100% exploration and 1–32 papers.');if(n!==this.state.settings.personalizedCount)this.showAllPapers();this.state.settings=await this.store.settings({exploration:x/100,personalizedCount:n});this.notify('Sampling settings saved. Existing daily selections remain pinned.');})));
@@ -504,7 +575,7 @@ export class DiscoveryApp {
     const groups=[['events','Feedback'],['bookmarks','Bookmarks'],['reading','Reading history'],['subscriptions','Author subscriptions'],['knowledge','Knowledge profile'],['glossary','Glossary'],['explanations','Cached AI explanations'],['selections','Saved daily selections']];
     const category=select(groups,'events');body.append(field('Selective deletion',category),this.button('Delete selected data',async()=>{if(!confirm(`Permanently delete ${groups.find(g=>g[0]===category.value)[1].toLowerCase()}?`))return;await this.store.clearCollection(category.value);this.showAllPapers();this.clearInlineAI();await this.reload();this.openSettings();}),
       this.button('Delete all local data',async()=>{if(!confirm('Permanently delete all arXiv Discovery data, settings, pairing and cached explanations on this browser? Export a backup first if needed.'))return;await this.store.clearAll();await this.cache.clear();this.showAllPapers();this.clearInlineAI();await this.reload();this.syncPaperTools();this.openSettings();this.notify('All saved Discovery data has been deleted.');},{class:'danger'}),
-      element('p',{class:'version'},'arXiv Discovery 1.1.0 · Independent userscript · Thank you to arXiv for use of its open access interoperability.'),
+      element('p',{class:'version'},'arXiv Discovery 1.1.1 · Independent userscript · Thank you to arXiv for use of its open access interoperability.'),
       link('Source, documentation and issues','https://github.com/sodium-qed/arXiv-scroller'));
   }
   aiSettings(body) {
@@ -534,13 +605,14 @@ export class DiscoveryApp {
     }));
   }
   async openAI(paper,term='',options={}) {
+    if(!this.mounted||!this.toolsEnabled())return;
     this.closePanel();
-    const tools=this.expandPaperTools(paper.id);if(!tools||!this.mounted)return;
-    this.currentPaper=paper;tools.detail.open=true;
+    const tools=this.paperTools.get(paper.id);if(!tools)return;
+    this.currentPaper=paper;
     this.inlineAI.get(paper.id)?.remove();
     const title=term?`Explain: ${term}`:'AI paper overview';
     const body=element('section',{class:'inline-ai','data-paper-id':paper.id,'aria-label':title});
-    this.inlineAI.set(paper.id,body);tools.detail.append(body);
+    this.inlineAI.set(paper.id,body);tools.body.append(body);
     body.append(element('div',{class:'row'},element('h3',{},title),this.button('Close explanation',()=>{body.remove();if(this.inlineAI.get(paper.id)===body)this.inlineAI.delete(paper.id);})),this.paperProtection(paper));
     const generation=await this.store.generation();if(!body.isConnected||this.inlineAI.get(paper.id)!==body)return;
     if(!this.state.settings.ai.enabled||!this.state.settings.ai.consent||!this.state.settings.ai.token) {
@@ -567,7 +639,7 @@ export class DiscoveryApp {
     } catch(error) {loading.textContent=error.message||String(error);loading.className='notice error';body.append(this.button('Check AI settings',()=>this.openSettings()));}
   }
   handleSelection(event) {
-    if(!event.isTrusted||!this.mounted||this.state.settings.mode==='original'||event.target?.closest?.('button,input,textarea,select,summary'))return;
+    if(!event.isTrusted||!this.mounted||!this.toolsEnabled()||event.target?.closest?.('button,input,textarea,select,summary'))return;
     if(event.currentTarget===document&&event.target?.closest?.('[data-arxiv-discovery]'))return;
     const selection=event.currentTarget?.getSelection?.()||window.getSelection();const term=selection?.toString().trim();
     if(!term||term.length>250){this.selectionBubble?.remove();this.selectionBubble=null;return;}
@@ -590,7 +662,7 @@ export class DiscoveryApp {
     bubble.append(this.button('Explain selection',()=>{bubble.remove();return this.openAI(paper,term,{context});}));(this.dialog?.open?this.dialog:this.root).append(bubble);this.selectionBubble=bubble;
   }
   handleKeys(event) {
-    if(!this.mounted||this.state.settings.mode==='original'||!event.isTrusted||!event.altKey||event.ctrlKey||event.metaKey||event.shiftKey)return;
+    if(!this.mounted||!this.toolsEnabled()||!event.isTrusted||!event.altKey||event.ctrlKey||event.metaKey||event.shiftKey)return;
     if(this.dialog?.open)return;
     // Retargeting hides focused controls in a closed shadow from document events.
     const active=[document.activeElement,...this.roots.map(root=>root.activeElement)].filter(Boolean);

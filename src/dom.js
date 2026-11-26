@@ -49,6 +49,7 @@ a{color:var(--link)}a:hover{text-decoration:underline}
 button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 h2{font-size:21px;margin:0}h3{font-size:17px;margin:16px 0 8px}p{margin:8px 0}small,.muted{color:var(--muted);font-size:12px}
 summary{cursor:pointer;display:list-item;max-width:max-content}
+:host(#arxiv-discovery-settings){float:right;margin:0 0 8px 12px;max-width:calc(100% - 24px)}.settings-launcher{font-size:13px;min-height:32px;padding:4px 10px}
 .tools{margin:5px 0 12px;font-size:13px}.tools summary{color:var(--native-link,#174e7a)}
 .tools button,.selection-note button,:host(#ad-listing-controls) button{background:transparent;border:0;border-radius:0;color:var(--native-link,#174e7a);min-height:24px;padding:1px 0;text-decoration:none}
 .tools button:hover,.selection-note button:hover,:host(#ad-listing-controls) button:hover{text-decoration:underline}

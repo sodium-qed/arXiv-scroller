@@ -2,11 +2,11 @@
 
 The browser suites use the supplied mathematics announcement and generated, clearly labeled fixtures. They intercept requests before navigation and exercise the production parser or the built userscript. No tests require arXiv availability, a hosted AI account, a pairing credential, or a paid request.
 
-## Verified release 1.1.0
+## Verified release 1.1.1
 
-Chromium 152.0.7977.0 with Playwright 1.62.0 passed all 15 userscript integration cases and all 7 parser cases. The tested release file was `dist/arxiv-discovery.user.js`, with SHA-256 `9e225b440f61eae184c12156759002283158e4926856a3283f11f5f97d588d65`. On the supplied 26 November 2026 listing, the script attached 701 collapsed disclosures, filtered the original list to 30 distinct papers, and restored all 701 entries.
+Chromium 152.0.7977.0 with Playwright 1.62.0 passed all 16 userscript integration cases and all 7 parser cases. The tested release file was `dist/arxiv-discovery.user.js`, with SHA-256 `e3dd0186e4275375528af28cf10e0d3939825d47f8b287c72d38902daf67150f`. On the supplied 26 November 2026 listing, all 701 papers had inline tools on first use. A daily selection showed 30 distinct papers in their published order. Choosing **Show all papers** restored all 701 entries.
 
-Separate visual checks used a locally served arXiv stylesheet and MathJax 2.7.3 with the same supplied HTML. Captures at 1440 × 750 and 390 × 844 showed the collapsed disclosures, the expanded paper actions, the daily filter, and an example AI answer beneath its paper. At phone width the inline answer and Settings dialog each fit without horizontal scrolling.
+At a 390 × 844 viewport, the browser test locates **Settings** to the right of the listing heading and above the first paper. It opens the dialog with Enter, closes it with Escape, and checks that focus returns to the button. The dialog fits the viewport without horizontal scrolling.
 
 ## Run the suites
 
@@ -32,9 +32,11 @@ The optional PDF extraction test runs when `pypdf` is installed. On a machine wi
 | Node unit tests | Taxonomy, sampling and matching, rationale and recorded probabilities, feedback revisions and training windows, distinct interest and knowledge data, learning and analytics, private storage, and AI request construction and provenance. |
 | Python bridge tests | Provider configuration, budget and request limits, source extraction and fallback, safe source handling, cache behavior and provider errors using local test doubles. |
 | Parser in Chromium | Every article list in the supplied fixture, 379 new submissions, 61 cross-submissions and 261 replacements, 701 distinct papers on 26 November 2026, bibliography and mathematical text, malformed records, missing formats, and pagination integrity. |
-| Userscript in Chromium | First use, finite unique selections, mode changes, replacing and restoring a paper, daily history, structural preservation and menu restoration, refresh and process restart, explicit feedback and reversal, bookmarks, name-only follows, knowledge, backup import, complete deletion and subsequent saves, dialogs at phone width, inline explanations and recursive dictionary selection, cached responses, provider failures, and native navigation for incomplete listings. |
+| Userscript in Chromium | Direct paper actions, the page-level Settings button, toggling tools, recommendation modes, finite unique selections, replacing and restoring a paper, daily history, structural preservation and menu restoration, refresh and process restart, explicit feedback and reversal, bookmarks, name-only follows, knowledge, backup import, complete deletion and subsequent saves, dialogs at phone width, inline explanations and recursive dictionary selection, cached responses, provider failures, and native navigation for incomplete listings. |
 
-The full-fixture case first checks that the add-on puts one collapsed **Discovery tools** disclosure at the end of each native paper description. It checks for the absence of a toolbar, duplicated paper cards, a startup dialog, and a filter on first use. It opens the daily selection from a paper's own controls and verifies that the visible `dt` and `dd` pairs stay in their original order.
+The full-fixture case finds one **Paper tools** group at the end of each native paper description. It scrolls to the first and last papers and checks that their feedback, bookmark, reading and AI actions are visible before any click. It opens a daily selection through **More tools** and verifies that the visible `dt` and `dd` pairs stay in their original order.
+
+The Settings cases change the recommendation mode on the full listing and during a daily selection. Turning off **Enable paper tools** while filtering restores every native entry and disables keyboard feedback and the dictionary prompt. Settings stays available to turn the tools back on. A fresh browser process reopens the same disposable profile and checks the saved preference, mode, daily paper identifiers and bookmark.
 
 The DOM comparison removes the add-on's own hosts from a detached clone and compares the remaining markup to the exact original. During a filter it permits the temporary `hidden` attributes on native paper rows. It checks the original elements' identity, parentage and sample typography throughout. Restoring the listing must restore prior attribute values, including `hidden="until-found"`. The full removal check refreshes the page and reopens the add-on through its registered menu.
 
@@ -45,7 +47,8 @@ Browser tests use a restrictive content security policy and intercept every rout
 ## Check an installed copy
 
 1. Install the release userscript in Tampermonkey, then open the mathematics new-listing page. Check the normal paper links, pager, keyboard focus and original page order.
-2. Expand **Discovery tools** under a paper, open **More tools**, and choose **Daily selection**. Record a few identifiers from the native listing. Choose **Show all papers**, refresh, and reopen the daily selection. Compare the visible paper identifiers.
-3. Use the controls under one paper to bookmark it and record feedback. Restart the browser and check both records through the Tampermonkey menu. With AI configured, highlight a term and confirm the explanation appears underneath that paper.
-4. Choose **Original arXiv** and confirm the added controls disappear. Reopen through **Show arXiv Discovery** in the Tampermonkey menu.
-5. When verifying an upgrade, export a backup, update the installed userscript in place, and compare the retained selection and records. Record the browser, Tampermonkey and userscript versions.
+2. Bookmark a paper directly beneath its abstract and record feedback there. Open **Settings** at the upper right, choose a recommendation mode and select **Show daily selection**. Record a few identifiers from the native listing.
+3. Turn off **Enable paper tools** while the selection is active. Check that the full listing returns and that **Settings** stays available. Refresh, reopen Settings, check the saved mode and turn the tools back on. Reopen the daily selection and compare its paper identifiers.
+4. Restart the browser and check the bookmark and feedback through the Tampermonkey menu. With AI configured, highlight a term and confirm the explanation appears beneath that paper.
+5. Choose **Original arXiv** and confirm that the paper controls and Settings button disappear. Reopen through **Show arXiv Discovery** in the Tampermonkey menu.
+6. When verifying an upgrade, export a backup, update the installed userscript in place, and compare the retained selection and records. Record the browser, Tampermonkey and userscript versions.

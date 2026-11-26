@@ -1,12 +1,12 @@
 # Architecture
 
-The installable file is a Tampermonkey userscript. At document idle, it parses the current arXiv page, loads the reader's private state and attaches a collapsed **Discovery tools** disclosure to each native paper entry. The optional Python process on loopback handles paper retrieval for AI and provider credentials.
+The installable file is a Tampermonkey userscript. At document idle, it parses the current arXiv page and loads the reader's private state. By default it mounts an upper-right **Settings** button and a visible action row beneath each native paper entry. The optional Python process on loopback handles paper retrieval for AI and provider credentials.
 
 ## Browser components
 
 | Component | Responsibility |
 | --- | --- |
-| `src/main.js` and `src/app.js` | Start the top-frame application, map paper records to native DOM pairs, register menu commands and mount each paper's disclosure. Apply the selected filter to existing pairs, show explanations inline, and open management dialogs on request. |
+| `src/main.js` and `src/app.js` | Start the top-frame application, map paper records to native DOM pairs, register menu commands and mount the settings button and paper controls. Apply the selected filter to existing pairs, show explanations inline, and open management dialogs on request. |
 | `src/dom.js` and `src/math.js` | Build scoped controls and safe links inside closed shadow roots. Generated explanation text can contain delimited TeX, converted to native MathML with a locally bundled renderer. arXiv owns the paper markup. |
 | `src/categories.js` and `src/parser.js` | Normalize categories, arXiv identities, authors, dates, paper fields and links. The node lookup is separate from serializable records. The parser handles repeated article-list IDs. |
 | `src/native-list.js` | Filter existing identifier/description pairs by paper ID. Track only the row visibility changes made by the userscript, restore them when the filter clears, and enumerate visible rows in current DOM order for keyboard navigation. |
@@ -22,11 +22,13 @@ The installable file is a Tampermonkey userscript. At document idle, it parses t
 ## From announcement to selection
 
 1. The parser reads the date displayed by arXiv and pairs each article identifier with its description within the correct submission section. It compares recognized records, advertised section counts and the total.
-2. The page initially keeps arXiv's complete layout. **More tools** within any paper disclosure and the Tampermonkey menu provide global commands. On a partial daily page, **Open complete arXiv listing** opens the same archive on arXiv so the browser receives genuine paper rows. The daily filter requires a verified single date and complete counts on that page.
+2. The page initially shows all of arXiv's entries in native order. **Settings** saves the recommendation mode. Changing it updates an active daily selection immediately. From the full listing, **Show daily selection** applies the saved mode. **More tools** beneath each paper and the Tampermonkey menu also provide global commands. On a partial daily page, **Open complete arXiv listing** opens the same archive on arXiv so the browser receives genuine paper rows. The daily filter requires a verified single date and complete counts on that page.
 3. New submissions are eligible initially. Cross-submissions and replacements have separate switches. The seeded sampler can use primary and secondary mathematics subjects. Randomized maximum matching assigns the greatest possible number of categories without reusing a paper.
 4. A daily record pins the original draw and current draw for its archive, date, mode and eligibility settings. Explicit changes append older draws to its revision history. Saved snapshots retain the paper identity and version for links in selection history.
-5. Applying the draw filters existing identifier/description pairs in place and preserves their original order. A compact status beside the native pagination exposes **Selection options** and **Show all papers**. Each selected entry has its own rationale and replacement action. Clearing the filter restores the native entries. Refreshing starts with arXiv's full native view. Reapplying the same daily selection uses the pinned record. **Original arXiv** also removes the userscript's UI.
+5. Applying the draw filters existing identifier/description pairs in place and preserves their original order. A compact status beside the native pagination exposes **Selection options** and **Show all papers**. Each selected entry has its own rationale and replacement action. Clearing the filter restores the native entries. Refreshing starts with arXiv's full native view. Reapplying the same daily selection uses the pinned record.
 6. Manual reads, ratings, bookmarks and author follows have distinct records. A rating correction references its predecessor. Training resolves the current feedback for each paper, applies the chosen exclusions, and rebuilds from eligible likes and dislikes.
+
+Turning off **Enable paper tools** clears the filter and removes paper controls and inline explanations. The upper-right button stays available to edit the mode or enable tools again. **Original arXiv** removes that button as well. **Show arXiv Discovery** in Tampermonkey restores the add-on.
 
 The model encodes words, adjacent retained words, curated mathematical concepts and categorical metadata in a sparse vector. The concept vocabulary can link different expressions for selected ideas. Frequency, title emphasis and regularization influence what a rating transfers to another paper. New concepts outside the vocabulary can share lexical features. A replaceable encoder, training and inference API separates model changes from category matching. [Encoding and statistical details](RECOMMENDER.md)
 

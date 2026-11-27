@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "probes": [
+    {
+      "provider": "openaire",
+      "url": "https://api.openaire.eu/graph/v4/research-products?filter=ids.arxiv:2611.33166",
+      "retrievedAt": "2026-11-26T23:31:10.958292+00:00",
+      "httpStatus": 200,
+      "finalUrl": "https://api.openaire.eu/graph/v4/research-products?filter=ids.arxiv:2611.33166",
+      "headers": {
+        "content-type": "application/json",
+        "x-ratelimit-limit": "7199"
+      },
+      "responseSha256": "9cd0f60be9f9f08c22e73d91b2a4117a807e97fa22c72da3694a0795baf8788c",
+      "responseExcerpt": {
+        "header": {
+          "numFound": 0,
+          "maxScore": 0.0,
+          "queryTime": 9,
+          "page": 1,
+          "pageSize": 10
+        },
+        "results": []
+      }
+    },
+    {
+      "provider": "semantic-scholar",
+      "url": "https://api.semanticscholar.org/graph/v1/paper/ARXIV:2611.33166?fields=paperId,externalIds,citationCount",
+      "retrievedAt": "2026-11-26T23:31:10.959792+00:00",
+      "httpStatus": 429,
+      "responseSha256": "65ab993d12c5c2cc9b68e6da2bb79b326930283e520363ffcdc145f88cd5a148",
+      "responseExcerpt": {
+        "message": "Too Many Requests. Please wait and try again or apply for a key for higher rate limits. https://www.semanticscholar.org/product/api#api-key-form",
+        "code": "429"
+      }
+    },
+    {
+      "provider": "ads",
+      "url": "https://api.adsabs.harvard.edu/v1/search/query?q=arxiv%3A2611.33166&fl=bibcode,identifier,read_count&rows=10",
+      "retrievedAt": "2026-11-26T23:31:10.960458+00:00",
+      "httpStatus": 401,
+      "responseSha256": "6ea5cf105c21df4126ea67c1511885a38b7946139ef8bd160a90f6e0e5bd57b6",
+      "responseExcerpt": {
+        "message": "Missing \"Authorization\" in headers."
+      }
+    },
+    {
+      "provider": "mendeley",
+      "url": "https://api.mendeley.com/catalog?arxiv=2611.33166&view=stats",
+      "retrievedAt": "2026-11-26T23:31:10.961081+00:00",
+      "httpStatus": 401,
+      "responseSha256": "d3a141810abc1e97fee88746483180419a69188563f80aa26057526565b0ad95",
+      "responseExcerpt": {
+        "message": "Could not access resource because: No auth header",
+        "errorId": "oauth/NOT_AUTHORIZED"
+      }
+    },
+    {
+      "provider": "arcxiv",
+      "url": "https://arcxiv.org/api/agent/papers/2611.33166",
+      "retrievedAt": "2026-11-26T23:31:10.961745+00:00",
+      "httpStatus": 200,
+      "finalUrl": "https://arcxiv.org/api/agent/papers/2611.33166",
+      "headers": {
+        "content-type": "application/json"
+      },
+      "responseSha256": "7dbd8771663b72e9dec2e35a59a3a9c401ad8838ce07c2e9d6d08e9db4f201ed",
+      "responseExcerpt": {
+        "arxivId": "2611.33166",
+        "citationCount": null,
+        "updatedAt": "2026-11-26T00:00:00.000Z"
+      },
+      "readershipFieldsPresent": [],
+      "excludedNonReadershipFields": [
+        "qualitySignals"
+      ],
+      "note": "Full paper/AI prose omitted; no readership field in this response. This was a connectivity probe, not a coverage sample."
+    }
+  ],
+  "scope": "Single-identifier nonrandom preflight; no population coverage inference.",
+  "additionalOpenAireDiagnostics": [
+    {
+      "purpose": "Known older identifier control with 1706.03762 and2611.33166",
+      "httpStatus": 200,
+      "totalMatches": 1,
+      "matchedId": "1706.03762",
+      "countedInHourlyBudget": true
+    },
+    {
+      "purpose": "Discover effective batch ceiling",
+      "httpStatus": 400,
+      "requestedIdCount": 100,
+      "error": "At most50 pipe-separated values are allowed per field.",
+      "countedInHourlyBudget": true
+    }
+  ]
+}

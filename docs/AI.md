@@ -106,14 +106,25 @@ The paper-specific setting overrides the global default. Protected mode supplies
 
 Definitions support standard, simpler and rigorous explanations, an illustrative example, prerequisite topics, and a source-linked account of the term's use. A follow-up can include a short previous-answer excerpt to clarify a pronoun or a recursively selected term. An earlier generated explanation can supply context for a question. Only quotations from the acquired paper can establish a paper-specific claim.
 
+## Structured Highlights assessments
+
+Open the Highlights feed from a complete Recent population, choose **Assess selected Recent papers**, and select the papers explicitly. The configured batch limit bounds each action. Opening a feed does not trigger analysis. Requests use the existing paired bridge, provider consent, allowance and spending limits, with the full reading profile and the normal HTML/PDF/abstract source fallback. Closing the assessment panel or changing the active view stops further requests in the batch.
+
+The separate `highlight` action returns a decision with `status`, `basis`, `reason` and verified `citations`. Only `candidate` decisions enter Highlights. The allowed bases are `open_problem`, `bound`, `method`, `connection`, `generalization` and `computation`; ordinary topic description is insufficient. The model must identify a potentially notable author-claimed contribution under its stated hypotheses. It must not infer significance from authors, institutions or reputation. A candidate remains an **unverified AI assessment**: quotation matching does not independently establish proof validity, novelty, historical priority or importance.
+
+The bridge checks each proposed quotation against the actual supplied passage and creates its citation URL from that source. Missing or fabricated evidence, unsupported basis values, or an absent decision produce `not_established`. Inconclusive assessments remain separate from candidates. The browser validates the decision, requires citation URLs for the same paper and version, and checks that its quotations belong to the verified source-citation set. A generic overview or legacy cache entry cannot substitute for this decision.
+
+With **No Spoilers** active, the bridge returns a fixed `not_established` explanation before retrieving source text or calling a model. The existing consent and allowance checks still apply, and no provider attempt is charged for this protected response. The browser suppresses generated result prose and quotations for protected Highlight requests. Stored assessments are checked against the current paper version, protection setting and unknown-version expiry; changing protection hides incompatible candidates. Ordinary overview and dictionary behavior is unchanged.
+
 ## Limits and cost
 
 | Bridge environment variable | Default | Meaning |
 | --- | --- | --- |
-| `ARXIV_AI_PROVIDER` | `local` | `local` or `openai`. Must match browser consent. |
+| `ARXIV_AI_PROVIDER` | `local` | `local`, `openai` or the retained upstream `gemini` adapter. Must match browser consent. |
 | `ARXIV_AI_MODELS` | Required | Comma-separated model allowlist. The browser requests one exact model. |
 | `ARXIV_AI_TOKEN` | Required | Random URL-safe pairing token of 32–256 characters. |
-| `OPENAI_API_KEY` | Required for hosted | Provider credential read only by the hosted bridge. |
+| `OPENAI_API_KEY` | Required for OpenAI | Provider credential read only by the OpenAI bridge configuration. |
+| `GEMINI_API_KEY` | Required for Gemini | Provider credential read only by the retained upstream Gemini configuration. |
 | `ARXIV_AI_PORT` | `4317` | Bridge port on literal IPv4 loopback. |
 | `ARXIV_AI_LOCAL_PORT` | `11434` | Local model service port on literal IPv4 loopback. |
 | `ARXIV_AI_MAX_INPUT_CHARS` | `100000` | Maximum source text characters per request, 256–120000. The system prompt and reader context also consume tokens. |
@@ -137,7 +148,7 @@ The HTTP transport has separate per-call output limits and timeouts. A local pro
 
 ## Offline validation
 
-From the repository root run the following commands. The bridge suite uses a real loopback HTTP server, an injected fixture arXiv fetcher and a local test-model responder. Hosted request shape is checked without contacting OpenAI. With `pypdf` installed, the suite also starts the real isolated PDF worker.
+From the repository root run the following commands. The bridge suite uses a real loopback HTTP server, an injected fixture arXiv fetcher and a local test-model responder. Hosted request shapes are checked without contacting OpenAI or Gemini. With `pypdf` installed, the suite also starts the real isolated PDF worker.
 
 ~~~sh
 node --test tests/ai.test.js

@@ -2,6 +2,23 @@
 
 The browser deliverable is the Tampermonkey userscript at `dist/arxiv-discovery.user.js`. Tampermonkey installs and updates the file using its userscript metadata. The reading interface shows an action row beneath each native paper's abstract by default. The upper-right **Settings** button controls paper tools and recommendation mode. Selection is an optional filter on the listing. An overview or definition opens inline with the paper. Secondary management views open when requested.
 
+## Feed expansion V1.3
+
+| Requirement group | Delivered behavior or explicit limit |
+|---|---|
+| Authoritative populations and all 32 categories | Complete Today/Recent research ingestion; multi-date Recent browser pagination, source-position and cohort reconciliation, normalized deduplication and source-defined dates. |
+| Today preservation | Existing pinned selections, replacement, regeneration, author/interest controls and native rendering. The newer square-root quota decision remains authoritative. The existing native Today filter still requires the full announcement on the page. |
+| Ten feeds | Today, Trending, Rising, For You, Discovery, Subscriptions, Highlights, Random, Recent and Saved share the existing interface and controls. [Guide](FEEDS.md) |
+| Readership research | Nineteen provider/service evaluations; real full-population OpenAIRE census, separate access probes, raw responses, provenance, category/date/age/type reports and offline reproducibility. No unsupported coverage or latency claims. |
+| Trending | Functional single-metric quality-gated ranking. The observed census fails metric availability, so the default result is explicitly unavailable. No fallback is relabelled as popularity. |
+| Rising | Cumulative-only validation and tested difference calculation; investigated metrics do not qualify and the production feed remains explicitly unavailable. |
+| Highlights | On-demand structured AI candidates supported by verified source quotes; inconclusive decisions kept separately; existing consent, budget and spoiler controls reused. |
+| Data, settings and privacy | Compatible old backups, separate external observations, independent interest resets, safe import, bounded retention, source cache, offline labels, cancellation and generation guards. |
+| Infrastructure | Reproducible local freezer, collector, snapshot append and offline replay. No paid service or recurring job activated. |
+| Packaging and delivery | Updated installable userscript and documentation on `feature/trending`; pull request for review. No merge or release publication is part of this authorization. |
+
+The earlier feature map below describes the stable reading foundation retained by this change.
+
 ## Feature map
 
 | Brief section | Delivered behavior and location |

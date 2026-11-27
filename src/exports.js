@@ -11,7 +11,7 @@ export function bookmarksBibtex(state) {
   // Bibliography metadata is text, never a source of executable TeX commands.
   const tex={'\\':'\\textbackslash{}','{':'\\{','}':'\\}','$':'\\$','&':'\\&','%':'\\%','#':'\\#','_':'\\_','~':'\\textasciitilde{}','^':'\\textasciicircum{}'};
   const esc=v=>String(v||'').replace(/[\\{}$&%#_~^]/g,c=>tex[c]).replace(/[\r\n]+/g,' ');
-  return Object.keys(state.bookmarks).map(id=>state.papers[id]).filter(Boolean).map(p=>`@misc{arxiv${p.id.replace(/[^a-zA-Z0-9]/g,'')},\n  title = {${esc(p.title)}},\n  author = {${p.authors.map(a=>esc(a.name)).join(' and ')}},\n  eprint = {${esc(p.id)}},\n  archivePrefix = {arXiv},\n  primaryClass = {${esc(p.primaryCategory)}},\n  year = {${String(p.announcementDate||'').slice(0,4)}},\n  url = {https://arxiv.org/abs/${p.id}}\n}`).join('\n\n')+'\n';
+  return Object.keys(state.bookmarks).map(id=>state.savedPapers?.[id]||state.papers[id]).filter(Boolean).map(p=>`@misc{arxiv${p.id.replace(/[^a-zA-Z0-9]/g,'')},\n  title = {${esc(p.title)}},\n  author = {${p.authors.map(a=>esc(a.name)).join(' and ')}},\n  eprint = {${esc(p.id)}},\n  archivePrefix = {arXiv},\n  primaryClass = {${esc(p.primaryCategory)}},\n  year = {${String(p.announcementDate||'').slice(0,4)}},\n  url = {https://arxiv.org/abs/${p.id}}\n}`).join('\n\n')+'\n';
 }
 export function downloadText(filename,text,type='text/plain') {
   const blob=new Blob([text],{type:`${type};charset=utf-8`});const url=URL.createObjectURL(blob);

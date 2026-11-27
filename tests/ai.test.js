@@ -166,3 +166,83 @@ test('progress events never enter cached prose and only the terminal result is a
   await assert.rejects(truncated.client.overview(paper),/incomplete/);
   assert.equal(truncated.cache.size,0);
 });
+
+function highlightReply(payload, changes = {}) {
+  const id = payload.paper.id + (payload.paper.version ? 'v' + payload.paper.version : '');
+  const url = 'https://arxiv.org/html/' + id;
+  const citation = {label:'[S1] Introduction',url:url+'#S1',quotes:['compact operators']};
+  return {text:'A provisional assessment of the authors’ stated method.',
+    source:{kind:'html',url,note:'Verified source excerpt.',citations:[citation]},
+    highlight:{status:'candidate',basis:['method'],reason:'The authors describe a method for this stated problem.',citations:[citation]},
+    ...changes};
+}
+
+test('highlight requests are deliberate, use the full profile and retain their decision in a separate cache', async () => {
+  const ctx = setup({ai:{profile:'quick',maxInputChars:18000},respond:(payload,url) =>
+    ({status:200,finalUrl:url,text:JSON.stringify(highlightReply(payload))})});
+  assert.equal(ctx.calls.length,0);
+  const pair = await Promise.all([ctx.client.highlight(paper,{noSpoilers:false,profile:'quick'}),
+    ctx.client.highlight(paper,{noSpoilers:false,profile:'quick'})]);
+  assert.equal(ctx.calls.length,1);
+  assert.equal(ctx.calls[0].payload.action,'highlight');
+  assert.equal(ctx.calls[0].payload.profile,'full');
+  assert.equal(ctx.calls[0].payload.limits.maxInputChars,18000);
+  assert.equal(pair[0].highlight.status,'candidate');
+  assert.deepEqual(pair[0].highlight.basis,['method']);
+  const cached = await ctx.client.highlight(paper,{noSpoilers:false});
+  assert.equal(cached.cached,true);
+  assert.deepEqual(cached.highlight,pair[0].highlight);
+  delete [...ctx.cache.values()][0].highlight;
+  await ctx.client.highlight(paper,{noSpoilers:false});
+  assert.equal(ctx.calls.length,2,'legacy explanation cache cannot stand in for a highlight decision');
+  await ctx.client.overview(paper,{noSpoilers:false,profile:'full'});
+  assert.equal(ctx.calls.length,3,'ordinary overview has a separate cache identity');
+});
+
+test('missing, fabricated, unsupported or cross-paper highlight decisions are rejected before caching', async () => {
+  const mutations = [
+    data => {delete data.highlight;},
+    data => {data.highlight.status='important';},
+    data => {data.highlight.basis=[];},
+    data => {data.highlight.basis=['prestige'];},
+    data => {data.highlight.basis=['method','method'];},
+    data => {data.highlight.citations=[];},
+    data => {data.highlight.citations=[{label:'[S1] Introduction',url:data.source.url+'#S1',quotes:['fabricated quotation']}];},
+    data => {data.highlight.citations=[{label:'[S1] Introduction',url:'https://arxiv.org/html/2401.99999v2#S1',quotes:['compact operators']}];},
+    data => {data.highlight.reason='';},
+    data => {data.highlight.status='not_established';}
+  ];
+  for (const mutate of mutations) {
+    const ctx=setup({respond:(payload,url) => {const data=highlightReply(payload);mutate(data);return {status:200,finalUrl:url,text:JSON.stringify(data)};}});
+    await assert.rejects(ctx.client.highlight(paper,{noSpoilers:false}),/highlight/);
+    assert.equal(ctx.cache.size,0);
+    assert.equal(ctx.calls.length,1);
+  }
+});
+
+test('protected highlight decisions cannot display generated result prose, source notes or quotations', async () => {
+  const ctx=setup({respond:(payload,url) => ({status:200,finalUrl:url,text:JSON.stringify(highlightReply(payload,{
+    text:'A result that must not be displayed.',highlight:{status:'not_established',basis:[],reason:'A result-bearing reason.',citations:[]}
+  }))})});
+  const answer=await ctx.client.highlight(paper);
+  assert.equal(answer.highlight.status,'not_established');
+  assert.match(answer.text,/No Spoilers/);
+  assert.equal(answer.text,answer.highlight.reason);
+  assert.deepEqual(answer.source.citations,[]);
+  assert.doesNotMatch(answer.text+answer.source.note,/result-bearing|must not be displayed|Verified source/);
+  const incompatible=setup({respond:(payload,url)=>({status:200,finalUrl:url,text:JSON.stringify(highlightReply(payload))})});
+  await assert.rejects(incompatible.client.highlight(paper),/highlight/);
+  assert.equal(incompatible.cache.size,0);
+});
+
+test('highlight requests keep the existing consent, pairing and budget gates and never retry automatically', async () => {
+  for (const ai of [{enabled:false},{consent:false},{token:''},{dailyRequests:0},{provider:'openai',dailyBudget:0}]) {
+    const ctx=setup({ai});
+    await assert.rejects(ctx.client.highlight(paper,{noSpoilers:false}));
+    assert.equal(ctx.calls.length,0);
+  }
+  const failure=setup({respond:()=>({status:502,text:JSON.stringify({error:'Provider unavailable'})})});
+  await assert.rejects(failure.client.highlight(paper,{noSpoilers:false}),/Provider unavailable/);
+  assert.equal(failure.calls.length,1);
+  assert.equal(failure.cache.size,0);
+});

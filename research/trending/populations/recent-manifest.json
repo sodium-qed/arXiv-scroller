@@ -1,0 +1,22 @@
+{
+  "pages": [
+    {
+      "url": "https://arxiv.org/list/math/recent?show=2000&skip=0",
+      "finalUrl": "https://arxiv.org/list/math/recent?show=2000&skip=0",
+      "status": 200,
+      "retrievedAt": "2026-11-26T23:30:47.055880+00:00",
+      "bytes": 2660465,
+      "sha256": "f586b3248385d85bfab4f98355207704bf52f1c180a8c67526269fbbdb9d21ac",
+      "file": "arxiv-trending-recent-population-chromium-pages/001.html.gz"
+    },
+    {
+      "url": "https://arxiv.org/list/math/recent?show=2000&skip=2000",
+      "finalUrl": "https://arxiv.org/list/math/recent?show=2000&skip=2000",
+      "status": 200,
+      "retrievedAt": "2026-11-26T23:33:54.746305+00:00",
+      "bytes": 757174,
+      "sha256": "eb06fd1ff9f41478f92327d65256ed706b9bbbc2592fa534f30a952ebc33ec6e",
+      "file": "arxiv-trending-recent-population-chromium-pages/002.html.gz"
+    }
+  ]
+}

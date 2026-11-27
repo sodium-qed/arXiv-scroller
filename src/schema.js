@@ -1,14 +1,16 @@
 // Only the fields defined here cross a backup or storage trust boundary.
 import {normalizeCategory, CATEGORIES} from './categories.js';
 import {listingCounts, listingUrl} from './parser.js';
+import {DEFAULT_FEED_SETTINGS, checkedFeedSettings} from './feed-settings.js';
 
 export const SCHEMA_VERSION = 1;
-export const COLLECTIONS = ['events', 'papers', 'bookmarks', 'reading', 'subscriptions', 'knowledge', 'glossary', 'selections', 'explanations'];
+export const COLLECTIONS = ['events', 'papers', 'savedPapers', 'bookmarks', 'reading', 'subscriptions', 'knowledge', 'glossary', 'selections', 'explanations', 'highlights'];
 export const DEFAULT_SETTINGS = {
   mode: 'random', includeCross: false, includeReplacements: false, exploration: 0.25,
   personalizedCount: 50, trainRandom: true, useSubscriptions: false,
   history: {mode: 'all', days: 30, start: '', end: ''}, resetAt: null, noSpoilers: true,
   paperSpoilers: {}, theme: 'auto', showTools: true,
+  feeds: DEFAULT_FEED_SETTINGS,
   ai: {enabled: false, url: 'http://127.0.0.1:4317', provider: 'local', token: '', model: '', consent: false,
     dailyRequests: 10, maxInputChars: 100000, maxOutputTokens: 1600, dailyBudget: 1, inputPerMillion: 0, outputPerMillion: 0, profile: 'quick', timeoutSeconds: 420}
 };
@@ -177,6 +179,19 @@ export function checkedPaper(value, key = value?.id) {
   return result;
 }
 
+export function mergePaperMetadata(previous, current) {
+  const next = {...current};
+  if (!previous || previous.id !== current.id || previous.title !== current.title || previous.version !== current.version || !current.version) return next;
+  for (const field of ['abstract','comments','journalRef']) if (!next[field] && previous[field]) next[field] = previous[field];
+  const links = {};
+  for (const field of PAPER_FIELDS) {
+    const ranges = current.inlineLinks?.[field] || (next[field] === previous[field] ? previous.inlineLinks?.[field] : null);
+    if (ranges) links[field] = ranges.map(range => ({...range}));
+  }
+  if (Object.keys(links).length) next.inlineLinks = links;
+  return next;
+}
+
 export function mergedSettings(raw = {}, portable = false) {
   const s = {...DEFAULT_SETTINGS, ...obj(raw, 'settings')};
   const h = {...DEFAULT_SETTINGS.history, ...obj(s.history, 'history settings')};
@@ -187,7 +202,7 @@ export function mergedSettings(raw = {}, portable = false) {
     theme: choice(s.theme, ['auto', 'light', 'dark'], 'theme'),
     history: {mode: choice(h.mode, ['all', 'none', 'lastDays', 'ignoreLastDays', 'before', 'after', 'excludeRange'], 'history mode'),
       days: number(h.days, 'training window days', 1, 36500, true), start: h.start === '' ? '' : date(h.start), end: h.end === '' ? '' : date(h.end)},
-    resetAt: optional(s.resetAt, timestamp),
+    resetAt: optional(s.resetAt, timestamp), feeds: checkedFeedSettings(s.feeds),
     paperSpoilers: recordMap(s.paperSpoilers, 'paper protections', (v, key) => { pid(key); return bool(v, 'paper protection'); })
   };
   for (const field of ['includeCross', 'includeReplacements', 'trainRandom', 'useSubscriptions', 'noSpoilers', 'showTools']) result[field] = bool(s[field], field);
@@ -219,7 +234,7 @@ function feedback(value, key) {
   check((e.version ?? paper.version) === paper.version, 'feedback paper version');
   const event = {eventId: key, paperId: paper.id, version: paper.version, timestamp: timestamp(e.timestamp),
     value: choice(e.value, ['like', 'dislike', 'background', 'neutral', 'removed'], 'feedback value'),
-    reason: str(e.reason ?? '', 'feedback reason', 8000), mode: choice(e.mode, MODES, 'feedback mode'),
+    reason: str(e.reason ?? '', 'feedback reason', 8000), mode: choice(e.mode, [...MODES,'trending','rising','for-you','highlights','recent','saved'], 'feedback mode'),
     selectionProbability: probability(e.selectionProbability), revisionOf: optional(e.revisionOf, uid),
     excluded: bool(e.excluded ?? false, 'feedback exclusion'), paper};
   if (e.features !== undefined) {
@@ -268,6 +283,17 @@ function source(value, id, version) {
   return result;
 }
 
+function highlightDecision(value, paperId, version, evidenceSource) {
+  const h = obj(value,'highlight decision');
+  const status = choice(h.status,['candidate','not_established'],'highlight decision status');
+  const basis = [...new Set(list(h.basis,'highlight basis',6).map(b => choice(b,['open_problem','bound','method','connection','generalization','computation'],'highlight basis')))];
+  const citations = source({...evidenceSource,citations:h.citations},paperId,version).citations || [];
+  check(status !== 'candidate' || basis.length > 0 && citations.some(c => c.quotes.length > 0),'source-backed highlight candidate');
+  check(citations.every(c => (evidenceSource.citations || []).some(s => s.label === c.label && s.url === c.url && c.quotes.every(q => s.quotes?.includes(q)))),'highlight evidence provenance');
+  check(status !== 'not_established' || basis.length === 0 && citations.length === 0,'inconclusive highlight decision');
+  return {status,basis,reason:str(h.reason,'highlight decision reason',2000,true),citations};
+}
+
 function glossary(value, key) {
   const g = obj(value, 'glossary entry');
   const paperId = pid(g.paperId);
@@ -292,6 +318,7 @@ function explanation(value, key) {
   check(key.startsWith(prefix) && /^[a-f0-9]{64}$/.test(key.slice(prefix.length)), 'explanation cache key');
   const entry = {paperId, version, text: str(v.text, 'cached explanation', 64000, true), source: source(v.source, paperId, version),
     savedAt: number(v.savedAt, 'cache timestamp', 0, 8640000000000000, true)};
+  if (v.highlight !== undefined) entry.highlight = highlightDecision(v.highlight,paperId,version,entry.source);
   if (v.usage !== undefined) {
     const usage = obj(v.usage, 'AI usage');
     entry.usage = {};
@@ -366,7 +393,7 @@ function selection(value, key) {
 export function checkedRecord(kind, key, value) {
   recordKey(key);
   switch (kind) {
-    case 'papers': return checkedPaper(value, key);
+    case 'papers': case 'savedPapers': return checkedPaper(value, key);
     case 'bookmarks': case 'reading': pid(key); return timestamp(value);
     case 'events': return feedback(value, key);
     case 'subscriptions': return subscription(value, key);
@@ -374,6 +401,18 @@ export function checkedRecord(kind, key, value) {
     case 'glossary': return glossary(value, key);
     case 'explanations': return explanation(value, key);
     case 'selections': return selection(value, key);
+    case 'highlights': {
+      const v = obj(value, 'AI highlight assessment');
+      const paperId = pid(v.paperId), version = number(v.version, 'highlight paper version', 0, 9999, true);
+      check(key === paperId, 'highlight key');
+      const provenance = source(v.source,paperId,version);
+      const decision = highlightDecision(v.highlight,paperId,version,provenance);
+      check(!v.noSpoilers || decision.status === 'not_established','protected highlight decision');
+      return {paperId, version, text: str(v.text, 'highlight assessment', 64000, true),
+        source: provenance, highlight:decision, assessedAt: timestamp(v.assessedAt),
+        noSpoilers: bool(v.noSpoilers, 'highlight spoiler protection'), announcementDate: optional(v.announcementDate,date),
+        assessmentKind: choice(v.assessmentKind, ['unverified_ai_assessment'], 'highlight assessment kind')};
+    }
     default: throw new Error('Unknown data collection.');
   }
 }
@@ -397,8 +436,8 @@ export function checkRevisionGraph(events, allowMissing = false) {
 }
 
 export function emptyState() {
-  return {settings: mergedSettings(), events: [], papers: {}, bookmarks: {}, reading: {},
-    subscriptions: [], knowledge: {}, glossary: {}, selections: {}, explanations: {}};
+  return {settings: mergedSettings(), events: [], papers: {}, savedPapers: {}, bookmarks: {}, reading: {},
+    subscriptions: [], knowledge: {}, glossary: {}, selections: {}, explanations: {}, highlights: {}};
 }
 
 export function validateImport(data) {

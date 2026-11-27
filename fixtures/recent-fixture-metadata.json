@@ -1,0 +1,24 @@
+{
+  "source": "User-supplied Recent Arxiv(1).txt",
+  "sourceUrl": "https://arxiv.org/list/math/recent",
+  "retrievedAt": null,
+  "provenance": "User-supplied HTML snapshot; original retrieval timestamp unknown. Not a live measurement.",
+  "bytes": 76327,
+  "sha256": "a30ac243137f975ac1aaf85f91821d05af90c5068ed5047bed9e40c9022f9a0d",
+  "expectedRows": 50,
+  "advertisedTotal": 2555,
+  "announcementDates": [
+    "2026-11-26",
+    "2026-11-25",
+    "2026-11-24",
+    "2026-11-23",
+    "2026-11-20"
+  ],
+  "dateTotals": {
+    "2026-11-26": 441,
+    "2026-11-25": 489,
+    "2026-11-24": 869,
+    "2026-11-23": 352,
+    "2026-11-20": 404
+  }
+}

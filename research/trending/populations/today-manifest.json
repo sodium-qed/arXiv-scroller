@@ -1,0 +1,13 @@
+{
+  "pages": [
+    {
+      "url": "https://arxiv.org/list/math/new?show=2000&skip=0",
+      "finalUrl": "https://arxiv.org/list/math/new?show=2000&skip=0",
+      "status": 200,
+      "retrievedAt": "2026-11-26T23:37:45.314388+00:00",
+      "bytes": 1710335,
+      "sha256": "1f9f865e2e9be965fcedd774ecbdbb828a966c00832557a9e2e1b12efb3eed1a",
+      "file": "arxiv-trending-today-population-pages/001.html.gz"
+    }
+  ]
+}

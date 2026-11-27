@@ -24,11 +24,11 @@ function arxivUrl(raw, base) {
   return url;
 }
 
-// Ignore a fetched document's <base>. Only follow the same arXiv daily listing.
+// Ignore a fetched document's <base>. Only follow the same authoritative listing.
 export function listingUrl(raw, base = DEFAULT_LIST) {
   const url = arxivUrl(raw, base);
   const current = arxivUrl(base, DEFAULT_LIST);
-  if (!url || !current || !/^\/list\/[a-z][a-z.-]*\/new\/?$/i.test(url.pathname)) return null;
+  if (!url || !current || !/^\/list\/[a-z][a-z.-]*\/(?:new|recent)\/?$/i.test(url.pathname)) return null;
   if (url.pathname.replace(/\/$/, '') !== current.pathname.replace(/\/$/, '')) return null;
   for (const [key, value] of url.searchParams) {
     if (!['skip', 'show'].includes(key) || url.searchParams.getAll(key).length !== 1) return null;
@@ -262,7 +262,7 @@ function parseDateHeading(value) {
   const normalized = value.trim().replace(/\s+/g, ' ');
   const heading = normalized.replace(/^(?:(?:showing\s+)?(?:new\s+)?(?:listings?|submissions?|announcements?)\s+(?:for|on)\s+|(?:cross|replacement)\s+submissions?\s+for\s+)/i, '')
     .replace(/^(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?),?\s+/i, '')
-    .replace(/\s+\((?:showing|total)\b.*$/i, '');
+    .replace(/\s+\((?:continued|showing|total)\b.*$/i, '');
   let year, month, day;
   const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(heading);
   const dmy = /^(\d{1,2})\s+([a-z]+)\s+(\d{4})$/i.exec(heading);
@@ -289,7 +289,7 @@ function sectionHeading(text) {
 }
 
 function countClaim(text) {
-  const match = /\bshowing\s+(?:items\s+)?([\d,]+)(?:\s*[-–—]\s*([\d,]+))?\s+(?:of|out of)\s+([\d,]+)\s+(?:entr(?:y|ies)|items?|articles?)/i.exec(text);
+  const match = /\bshowing\s+(?:(?:items|first|last)\s+)?([\d,]+)(?:\s*[-–—]\s*([\d,]+))?\s+(?:of|out of)\s+([\d,]+)\s+(?:entr(?:y|ies)|items?|articles?)/i.exec(text);
   if (!match) return null;
   const first = Number(match[1].replace(/,/g, ''));
   const shown = match[2] ? Number(match[2].replace(/,/g, '')) - first + 1 : first;
@@ -315,6 +315,7 @@ export function listingCounts(papers) {
 }
 
 export function parseListing(doc, baseUrl = doc.URL || DEFAULT_LIST) {
+  if (/\/recent\/?$/.test(arxivUrl(baseUrl, DEFAULT_LIST)?.pathname || '')) return parseRecentListing(doc, baseUrl);
   const page = doc.querySelector('#dlpage') || doc;
   const sourceUrl = arxivUrl(baseUrl, DEFAULT_LIST);
   const base = sourceUrl ? sourceUrl.href : DEFAULT_LIST;
@@ -410,9 +411,162 @@ export function parseListing(doc, baseUrl = doc.URL || DEFAULT_LIST) {
   }
   const complete = warnings.length === 0;
   return {
-    papers, counts, announcementDate: date, advertisedTotal, complete, warnings,
+    population: 'today', papers, counts, announcementDate: date, announcementDates: date ? [date] : [], advertisedTotal, complete, warnings,
     nextUrls: complete ? [] : navigation(page, base), baseUrl: base,
     sectionTotals, integrityWarnings: [...integrity],
+  };
+}
+
+// Recent is a source-defined collection of date cohorts, not a rolling clock
+// window. Its advertised total counts rows; normalized paper IDs may repeat.
+export function parseRecentListing(doc, baseUrl = 'https://arxiv.org/list/math/recent') {
+  const page = doc.querySelector('#dlpage') || doc;
+  const base = listingUrl(baseUrl, baseUrl);
+  const integrity = new Set();
+  if (!base || !new URL(base).pathname.endsWith('/recent')) {
+    throw new Error('A valid arXiv Recent listing URL is required.');
+  }
+  const totals = new Set();
+  for (const box of page.querySelectorAll('.paging, .pagination')) {
+    const match = /\btotal\s+(?:of\s+)?([\d,]+)\s+(?:entr(?:y|ies)|articles?|items?)\b/i.exec(box.textContent);
+    if (match) totals.add(Number(match[1].replace(/,/g, '')));
+  }
+  if (totals.size > 1) integrity.add('The pagination controls report conflicting entry totals.');
+  const advertisedTotal = [...totals][0] ?? null;
+  if (advertisedTotal !== null && (!Number.isSafeInteger(advertisedTotal) || advertisedTotal > 100000)) {
+    integrity.add('The Recent entry total exceeds the supported collection limit.');
+  }
+
+  // Native date-navigation fragments identify the first row of every cohort.
+  // These links freeze the complete date set even when the page shows 50 rows.
+  const dateStarts = {};
+  const declaredDates = [];
+  for (const anchor of page.querySelectorAll('ul a[href], ol a[href]')) {
+    if (anchor.closest('dt,dd')) continue;
+    const date = parseDateHeading(anchor.textContent);
+    const raw = anchor.getAttribute('href');
+    if (!date || !listingUrl(raw, base)) continue;
+    const match = /^#item([1-9]\d*)$/.exec(new URL(raw, base).hash);
+    if (!match) continue;
+    const start = Number(match[1]);
+    if (!Number.isSafeInteger(start) || (advertisedTotal !== null && start > advertisedTotal)) {
+      integrity.add('A Recent date-navigation row is outside the advertised population.');
+      continue;
+    }
+    if (date in dateStarts && dateStarts[date] !== start) integrity.add('Conflicting first rows for the ' + date + ' cohort.');
+    if (!(date in dateStarts)) declaredDates.push(date);
+    dateStarts[date] = start;
+  }
+  const dateTotals = {};
+  if (declaredDates.length) {
+    if (dateStarts[declaredDates[0]] !== 1) integrity.add('Recent date navigation does not begin with the first entry.');
+    for (let i = 0; i < declaredDates.length; i++) {
+      const date = declaredDates[i], next = declaredDates[i + 1];
+      if (next && (next >= date || dateStarts[next] <= dateStarts[date])) {
+        integrity.add('Recent date navigation is not in chronological listing order.');
+      }
+      const end = next ? dateStarts[next] : advertisedTotal === null ? null : advertisedTotal + 1;
+      if (end !== null) dateTotals[date] = end - dateStarts[date];
+    }
+  }
+  const records = new Map();
+  const positions = new Map();
+  const claims = [];
+  const observedDates = [];
+  let currentDate = null, currentSection = null, currentClaim = null;
+  let offset = Number(new URL(base).searchParams.get('skip') || 0);
+  let rows = 0, malformed = 0, brokenPairs = 0, missingSubjects = 0, undated = 0;
+  for (const node of page.querySelectorAll('h2,h3,h4,dt,dd')) {
+    const list = node.closest(LISTS);
+    if (/^H[234]$/.test(node.tagName)) {
+      if (node.closest('dt,dd')) continue;
+      const label = node.textContent.trim();
+      const date = parseDateHeading(label);
+      if (date) {
+        currentDate = date;
+        currentSection = null;
+        if (!observedDates.includes(date)) observedDates.push(date);
+        if (declaredDates.length && !declaredDates.includes(date)) integrity.add('A displayed cohort is absent from Recent date navigation.');
+        const claim = countClaim(label);
+        currentClaim = {date, ...claim, rows: 0};
+        claims.push(currentClaim);
+        if (Number.isSafeInteger(claim?.total)) {
+          if (date in dateTotals && dateTotals[date] !== claim.total) integrity.add('Conflicting totals for the ' + date + ' announcement cohort.');
+          dateTotals[date] = claim.total;
+        }
+      } else {
+        const section = sectionHeading(label);
+        if (section) currentSection = section;
+      }
+      continue;
+    }
+    if (!list || node.parentElement !== list) continue;
+    if (node.localName === 'dd') {
+      if (node.previousElementSibling?.localName !== 'dt') brokenPairs++;
+      continue;
+    }
+    rows++;
+    if (currentClaim) currentClaim.rows++;
+    const dd = node.nextElementSibling;
+    if (dd?.localName !== 'dd') { brokenPairs++; continue; }
+    if (!currentDate) { undated++; continue; }
+    const route = rowIdentity(node, base);
+    if (!route) { malformed++; continue; }
+    // Recent frequently has no explicit new/cross/replacement label. Keep null;
+    // neither the primary category nor a version number proves submission type.
+    const marker = node.querySelector('.list-identifier, .list-submission-type, [data-submission-type]');
+    const rawSection = marker?.getAttribute('data-submission-type') || marker?.textContent || '';
+    const section = sectionHeading(rawSection.trim()) || currentSection;
+    const paper = parseRow(node, dd, route, section, currentDate, base);
+    if (!paper.title) { malformed++; continue; }
+    if (!paper.categories.length) missingSubjects++;
+    const named = node.querySelector('a[name^="item"], a[id^="item"]');
+    const match = /^item([1-9]\d*)$/.exec(named?.getAttribute('name') || named?.id || '');
+    const index = match ? Number(match[1]) : offset + rows;
+    if (index !== offset + rows || !Number.isSafeInteger(index) || (advertisedTotal !== null && index > advertisedTotal)) {
+      integrity.add('A Recent row position disagrees with its pagination offset.');
+    }
+    if (positions.has(index)) integrity.add('A Recent row position is repeated within this page.');
+    positions.set(index, {index, paperId: paper.id, announcementDate: currentDate, section: paper.section, version: paper.version});
+    if (dateStarts[currentDate] && (index < dateStarts[currentDate] || index >= dateStarts[currentDate] + dateTotals[currentDate])) {
+      integrity.add('A Recent row falls outside its advertised announcement cohort.');
+    }
+    const previous = records.get(paper.id);
+    if (!previous) records.set(paper.id, paper);
+    else if (previous.version === paper.version && previous.title !== paper.title) integrity.add('Conflicting metadata for arXiv:' + paper.id + '.');
+  }
+  if (!observedDates.length && advertisedTotal !== 0) integrity.add('The Recent listing does not identify valid announcement cohorts.');
+  for (let i = 1; i < observedDates.length; i++) if (observedDates[i] >= observedDates[i - 1]) {
+    integrity.add('The displayed Recent cohorts are not in chronological listing order.');
+  }
+  if (!page.querySelector(LISTS) && !page.querySelector('.paging,.pagination')) integrity.add('No arXiv article list or pagination summary was found.');
+  if (brokenPairs) integrity.add('Unpaired paper headers or descriptions: ' + brokenPairs + '.');
+  if (undated) integrity.add('Recent entries without an announcement date: ' + undated + '.');
+  if (malformed) integrity.add('Entries without a valid arXiv identifier and title: ' + malformed + '.');
+  if (missingSubjects) integrity.add('Entries without readable subject classifications: ' + missingSubjects + '.');
+  for (const claim of claims) if (Number.isFinite(claim.shown) && (claim.shown !== claim.rows || claim.shown > claim.total)) {
+    integrity.add('The displayed row count disagrees with the ' + claim.date + ' cohort heading.');
+  }
+  const papers = [...records.values()];
+  const sourceEntries = [...positions.values()].sort((a, b) => a.index - b.index);
+  const announcementDates = declaredDates.length ? declaredDates : observedDates;
+  const warnings = [...integrity];
+  if (advertisedTotal === null) warnings.push('The Recent total could not be verified.');
+  else if (sourceEntries.length !== advertisedTotal || sourceEntries.some((entry, i) => entry.index !== i + 1)) {
+    warnings.push('This page contains ' + sourceEntries.length + ' of ' + advertisedTotal + ' Recent entries.');
+  }
+  if (sourceEntries.length === advertisedTotal) {
+    for (const [date, total] of Object.entries(dateTotals)) if (sourceEntries.filter(entry => entry.announcementDate === date).length !== total) {
+      warnings.push('The complete row count disagrees with the ' + date + ' cohort total.');
+    }
+  }
+  const complete = warnings.length === 0;
+  return {
+    population: 'recent', papers, counts: listingCounts(papers), announcementDate: null, announcementDates,
+    advertisedTotal, entryCount: sourceEntries.length, distinctTotal: complete ? papers.length : null,
+    sourceEntries, dateTotals, dateStarts, cohortSignature: declaredDates.length ? JSON.stringify(declaredDates.map(date => [date, dateStarts[date]])) : null,
+    sectionTotals: {}, complete, warnings, integrityWarnings: [...integrity], baseUrl: base,
+    nextUrls: complete ? [] : navigation(page, base),
   };
 }
 

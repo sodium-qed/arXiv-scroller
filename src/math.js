@@ -11,13 +11,13 @@ const endOf = new Map([['$', '$'], ['$$', '$$'], ['\\(', '\\)'], ['\\[', '\\]']]
 // AI output occasionally omits math delimiters despite the prompt. Recover only
 // recognizable, compact TeX commands and retain the original text as fallback.
 // This is intentionally limited to AI explanations, never raw paper content.
-const bareCommand = String.raw`\\(?:alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|pi|rho|sigma|tau|phi|varphi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Phi|Psi|Omega|mathbb|mathcal|mathbf|mathrm|mathit|mathop|overline|underline|hat|bar|vec|sqrt|frac|partial|nabla|infty|subset|subseteq|supset|supseteq|in|notin|leq|geq|neq|approx|times|cdot|to|mapsto|rightarrow|leftarrow|sum|prod|int)(?![A-Za-z])`;
+const bareCommand = String.raw`\\(?:alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|pi|rho|sigma|tau|phi|varphi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Phi|Psi|Omega|mathbb|mathcal|mathbf|mathrm|mathit|mathop|overline|underline|ddot|dot|hat|bar|vec|sqrt|frac|bigl|bigr|partial|nabla|infty|subset|subseteq|supset|supseteq|in|notin|leq|geq|neq|approx|times|cdot|to|mapsto|rightarrow|leftarrow|sum|prod|int)(?![A-Za-z])`;
 const bareArg = String.raw`\{[A-Za-z0-9+\-=_^ ]{0,80}\}`;
 const bareScript = String.raw`[_^](?:${bareArg}|[A-Za-z0-9])`;
-const bareAtom = String.raw`[A-Za-z](?:${bareScript}){0,3}`;
+const bareAtom = String.raw`[A-Za-z\u0370-\u03ff](?:${bareScript}){0,3}`;
 const bareMacro = String.raw`${bareCommand}(?:${bareArg}){0,2}(?:${bareScript}){0,3}`;
 const bareTex = new RegExp(
-  String.raw`(?<![\w\\])(?:${bareAtom}(?:[=+*/-]${bareAtom}){0,8}[=+*/(\-]?)?${bareMacro}(?:${bareMacro}|${bareScript}|${bareAtom}|\\[!,;:]|[()+*/\-]|\d{1,12}){0,40}(?:\s+[A-Za-z](?![A-Za-z])(?=\s*[=<>]))?(?:\s*[=<>]\s*(?:[A-Za-z](?![A-Za-z])|\d{1,12}))?`, 'g');
+  String.raw`(?<![\w\\])(?:${bareAtom}(?:[=+*/-]${bareAtom}){0,8}[=+*/(\-]?)?${bareMacro}(?:${bareMacro}|${bareScript}|${bareAtom}|\\[!,;:]|[()\[\]=+*/\-]|\d{1,12}){0,120}(?:\s+[A-Za-z](?![A-Za-z])(?=\s*[=<>]))?(?:\s*[=<>]\s*(?:[A-Za-z](?![A-Za-z])|\d{1,12}))?`, 'g');
 
 // Also recover compact scripted expressions that have no TeX commands at all.
 // Require a braced script and keep the alphabet small so ordinary prose and

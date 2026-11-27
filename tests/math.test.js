@@ -108,3 +108,11 @@ test('AI explanations render compact undelimited scripted notation without swall
   assert.equal(result.children.at(-1).text, '. Keep snake_case and identifier_{text}.');
   assert.equal(mathFragment(doc, input).children.filter(node => node.name === 'math').length, 1);
 });
+
+test('recovers a bare equation with derivatives, Greek letters and sized brackets', () => {
+  const formula = String.raw`\ddot{q}(s)=α\bigl[q(s)-q(-s)\bigr]+β\bigl[\dot{q}(s)-\dot{q}(-s)\bigr]`;
+  const result = mathFragment(doc, 'Consider ' + formula + '. Done.', {recoverBareTex:true});
+  const annotations = [...result.walk()].filter(node => node.name === 'annotation').map(node => node.textContent);
+  assert.deepEqual(annotations, [formula]);
+  assert.equal(result.children.at(-1).text, '. Done.');
+});

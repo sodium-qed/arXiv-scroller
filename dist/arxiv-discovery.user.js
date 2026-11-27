@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         arXiv Discovery
 // @namespace    https://github.com/sodium-qed/arXiv-scroller
-// @version      1.3.0
+// @version      1.3.1
 // @description  A finite daily mathematics selection, reversible local recommendations, and optional paper explanations. Adds to arXiv without replacing its interface.
 // @author       sodium-qed
 // @homepageURL  https://github.com/sodium-qed/arXiv-scroller
@@ -2988,7 +2988,7 @@ const {trainModel,activeFeedback,analytics,subscriptionMatches} = __require("src
 const {generateSelection,replaceSelectionPaper} = __require("src/sampling.js");
 const {makeId,PublicCache} = __require("src/storage.js");
 const {AIClient} = __require("src/ai.js");
-const {element,link,field,select,checkbox,STYLES} = __require("src/dom.js");
+const {element,link,field,select,checkbox,applyShadowStyles} = __require("src/dom.js");
 const {feedbackCSV,readingCSV,bookmarksBibtex,downloadText} = __require("src/exports.js");
 const {gmRequest} = __require("src/transport.js");
 const {mathFragment} = __require("src/math.js");
@@ -3081,7 +3081,7 @@ class DiscoveryApp {
     const host=element('div',{id,'data-arxiv-discovery':'true','data-theme':this.state.settings.theme});
     if(!this.nativeLinkColor){const source=document.querySelector('#dlpage dt a[href],a[href*="/abs/"],a[href*="/pdf/"]');if(source)this.nativeLinkColor=getComputedStyle(source).color;}
     if(this.nativeLinkColor)host.style.setProperty('--native-link',this.nativeLinkColor);
-    const root=host.attachShadow({mode:'closed'});root.append(element('style',{},STYLES));
+    const root=host.attachShadow({mode:'closed'});applyShadowStyles(root);
     parent.insertBefore(host,before);this.hosts.push(host);this.roots.push(root);
     root.addEventListener('mouseup',e=>this.handleSelection(e));return {host,root};
   }
@@ -3221,10 +3221,15 @@ class DiscoveryApp {
   removeHost(host) {if(!host)return;host.remove();this.hosts=this.hosts.filter(h=>h!==host);this.roots=this.roots.filter(r=>r.host!==host);}
   clearInlineAI() {for(const body of this.inlineAI.values())body.remove();this.inlineAI.clear();this.selectionBubble?.remove();this.selectionBubble=null;}
   moreTools() {
-    const row=element('div',{class:'more-actions'});
-    const commands=[['Research feeds',()=>this.feeds.openMenu()],['Daily selection',()=>this.openDaily()],['Show all papers',()=>this.showAllPapers()],['Previous selections',()=>this.openPrevious()],['All papers in a category',()=>this.openCategory()],['Bookmarks',()=>this.openBookmarks()],['Authors',()=>this.openAuthors()],['Interests',()=>this.openInterests()],['Knowledge',()=>this.openKnowledge()],['Settings',()=>this.openSettings()],['Original arXiv',()=>this.hide()]];
-    for(const [label,action] of commands)row.append(this.button(label,action));
-    return element('details',{class:'more-tools'},element('summary',{},'More tools'),row);
+    const details=element('details',{class:'more-tools'},element('summary',{},'More tools'));
+    details.addEventListener('toggle',()=>{
+      if(!details.open||details.querySelector('.more-actions'))return;
+      const row=element('div',{class:'more-actions'});
+      const commands=[['Research feeds',()=>this.feeds.openMenu()],['Daily selection',()=>this.openDaily()],['Show all papers',()=>this.showAllPapers()],['Previous selections',()=>this.openPrevious()],['All papers in a category',()=>this.openCategory()],['Bookmarks',()=>this.openBookmarks()],['Authors',()=>this.openAuthors()],['Interests',()=>this.openInterests()],['Knowledge',()=>this.openKnowledge()],['Settings',()=>this.openSettings()],['Original arXiv',()=>this.hide()]];
+      for(const [label,action] of commands)row.append(this.button(label,action));
+      details.append(row);
+    });
+    return details;
   }
   selectionEntry(id) {return this.listView==='daily'?this.activeSelection?.current.entries.find(entry=>entry.paperId===id)||null:null;}
   currentFeedback(paper) {return this.latestFeedback.get(paper.id);}
@@ -4510,6 +4515,31 @@ return {AIClient};
 "src/dom.js": (__require) => {
 const {mathFragment} = __require("src/math.js");
 
+// All paper controls use the same rules. Constructing a separate stylesheet
+// for every paper needlessly duplicates parsing and memory on large listings.
+const sharedSheets = new WeakMap();
+function applyShadowStyles(root) {
+  const doc = root.ownerDocument;
+  if (!sharedSheets.has(doc)) {
+    let sheet = null;
+    try {
+      const Sheet = doc.defaultView?.CSSStyleSheet;
+      if (Sheet && 'adoptedStyleSheets' in root) {
+        sheet = new Sheet();
+        sheet.replaceSync(STYLES);
+      }
+    } catch { sheet = null; }
+    sharedSheets.set(doc, sheet);
+  }
+  const sheet = sharedSheets.get(doc);
+  if (sheet) {
+    try { root.adoptedStyleSheets = [sheet]; return; } catch { /* Use a style element if adoption is unavailable. */ }
+  }
+  const style = doc.createElement('style');
+  style.textContent = STYLES;
+  root.append(style);
+}
+
 function element(tag,attrs={},...children) {
   const node=document.createElement(tag);
   for(const [key,value] of Object.entries(attrs||{})) {
@@ -4582,7 +4612,7 @@ dialog{padding:0;border:1px solid var(--line);border-radius:5px;color:var(--fg);
 @media(max-width:600px){.dialog-header{padding:12px}.dialog-body{padding:4px 12px 16px}.columns{display:block}.tabular{font-size:11px}dialog{max-height:94vh;width:calc(100vw - 16px);max-width:calc(100vw - 16px)}.inline-ai{padding:4px 8px}.selection-note>details{margin-left:0;display:block}}
 `;
 
-return {element,safeURL,link,field,select,checkbox,richText,STYLES};
+return {applyShadowStyles,element,safeURL,link,field,select,checkbox,richText,STYLES};
 },
 "src/math.js": (__require) => {
 const {temml} = __require("vendor/temml.js");

@@ -5,7 +5,7 @@ import {trainModel,activeFeedback,analytics,subscriptionMatches} from './recomme
 import {generateSelection,replaceSelectionPaper} from './sampling.js';
 import {makeId,PublicCache} from './storage.js';
 import {AIClient} from './ai.js';
-import {element,link,field,select,checkbox,STYLES} from './dom.js';
+import {element,link,field,select,checkbox,applyShadowStyles} from './dom.js';
 import {feedbackCSV,readingCSV,bookmarksBibtex,downloadText} from './exports.js';
 import {gmRequest} from './transport.js';
 import {mathFragment} from './math.js';
@@ -98,7 +98,7 @@ export class DiscoveryApp {
     const host=element('div',{id,'data-arxiv-discovery':'true','data-theme':this.state.settings.theme});
     if(!this.nativeLinkColor){const source=document.querySelector('#dlpage dt a[href],a[href*="/abs/"],a[href*="/pdf/"]');if(source)this.nativeLinkColor=getComputedStyle(source).color;}
     if(this.nativeLinkColor)host.style.setProperty('--native-link',this.nativeLinkColor);
-    const root=host.attachShadow({mode:'closed'});root.append(element('style',{},STYLES));
+    const root=host.attachShadow({mode:'closed'});applyShadowStyles(root);
     parent.insertBefore(host,before);this.hosts.push(host);this.roots.push(root);
     root.addEventListener('mouseup',e=>this.handleSelection(e));return {host,root};
   }
@@ -238,10 +238,15 @@ export class DiscoveryApp {
   removeHost(host) {if(!host)return;host.remove();this.hosts=this.hosts.filter(h=>h!==host);this.roots=this.roots.filter(r=>r.host!==host);}
   clearInlineAI() {for(const body of this.inlineAI.values())body.remove();this.inlineAI.clear();this.selectionBubble?.remove();this.selectionBubble=null;}
   moreTools() {
-    const row=element('div',{class:'more-actions'});
-    const commands=[['Research feeds',()=>this.feeds.openMenu()],['Daily selection',()=>this.openDaily()],['Show all papers',()=>this.showAllPapers()],['Previous selections',()=>this.openPrevious()],['All papers in a category',()=>this.openCategory()],['Bookmarks',()=>this.openBookmarks()],['Authors',()=>this.openAuthors()],['Interests',()=>this.openInterests()],['Knowledge',()=>this.openKnowledge()],['Settings',()=>this.openSettings()],['Original arXiv',()=>this.hide()]];
-    for(const [label,action] of commands)row.append(this.button(label,action));
-    return element('details',{class:'more-tools'},element('summary',{},'More tools'),row);
+    const details=element('details',{class:'more-tools'},element('summary',{},'More tools'));
+    details.addEventListener('toggle',()=>{
+      if(!details.open||details.querySelector('.more-actions'))return;
+      const row=element('div',{class:'more-actions'});
+      const commands=[['Research feeds',()=>this.feeds.openMenu()],['Daily selection',()=>this.openDaily()],['Show all papers',()=>this.showAllPapers()],['Previous selections',()=>this.openPrevious()],['All papers in a category',()=>this.openCategory()],['Bookmarks',()=>this.openBookmarks()],['Authors',()=>this.openAuthors()],['Interests',()=>this.openInterests()],['Knowledge',()=>this.openKnowledge()],['Settings',()=>this.openSettings()],['Original arXiv',()=>this.hide()]];
+      for(const [label,action] of commands)row.append(this.button(label,action));
+      details.append(row);
+    });
+    return details;
   }
   selectionEntry(id) {return this.listView==='daily'?this.activeSelection?.current.entries.find(entry=>entry.paperId===id)||null:null;}
   currentFeedback(paper) {return this.latestFeedback.get(paper.id);}

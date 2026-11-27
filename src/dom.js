@@ -1,5 +1,30 @@
 import {mathFragment} from './math.js';
 
+// All paper controls use the same rules. Constructing a separate stylesheet
+// for every paper needlessly duplicates parsing and memory on large listings.
+const sharedSheets = new WeakMap();
+export function applyShadowStyles(root) {
+  const doc = root.ownerDocument;
+  if (!sharedSheets.has(doc)) {
+    let sheet = null;
+    try {
+      const Sheet = doc.defaultView?.CSSStyleSheet;
+      if (Sheet && 'adoptedStyleSheets' in root) {
+        sheet = new Sheet();
+        sheet.replaceSync(STYLES);
+      }
+    } catch { sheet = null; }
+    sharedSheets.set(doc, sheet);
+  }
+  const sheet = sharedSheets.get(doc);
+  if (sheet) {
+    try { root.adoptedStyleSheets = [sheet]; return; } catch { /* Use a style element if adoption is unavailable. */ }
+  }
+  const style = doc.createElement('style');
+  style.textContent = STYLES;
+  root.append(style);
+}
+
 export function element(tag,attrs={},...children) {
   const node=document.createElement(tag);
   for(const [key,value] of Object.entries(attrs||{})) {

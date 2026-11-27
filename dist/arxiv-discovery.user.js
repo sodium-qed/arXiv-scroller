@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         arXiv Discovery
 // @namespace    https://github.com/sodium-qed/arXiv-scroller
-// @version      1.2.5
+// @version      1.3.0
 // @description  A finite daily mathematics selection, reversible local recommendations, and optional paper explanations. Adds to arXiv without replacing its interface.
 // @author       sodium-qed
 // @homepageURL  https://github.com/sodium-qed/arXiv-scroller
@@ -27,6 +27,7 @@
 // @grant        GM_registerMenuCommand
 // @grant        GM_xmlhttpRequest
 // @connect      127.0.0.1
+// @connect      arxiv.org
 // ==/UserScript==
 
 (() => {
@@ -50,6 +51,8 @@ return {};
 },
 "src/storage.js": (__require) => {
 const {activeFeedback, paperFeatures} = __require("src/recommender.js");
+const {validateObservationFile, retainObservations, METRIC_DEFINITIONS} = __require("src/readership.js");
+const {validatePopulationSnapshot} = __require("src/network.js");
 const {SCHEMA_VERSION, DEFAULT_SETTINGS, COLLECTIONS, checkedRecord, recordKey, checkedPaper, checkRevisionGraph,
   mergedSettings, emptyState, validateImport, checkedPublicListing, publicListingKey} = __require("src/schema.js");
 
@@ -62,6 +65,8 @@ const REVISION = PREFIX + 'revision';
 const SETTINGS = PREFIX + 'settings';
 const SCHEMA = PREFIX + 'schema';
 const DIGEST = PREFIX + 'listing-digest:';
+const READERSHIP = PREFIX + 'external-readership';
+const FEED_POPULATION = PREFIX + 'feed-population:';
 const LOCAL_QUEUES = new WeakMap();
 
 function makeId() {
@@ -198,6 +203,12 @@ class Store {
       if (Array.isArray(state[kind])) state[kind].push(value);
       else Object.defineProperty(state[kind], id, {value, enumerable: true, configurable: true, writable: true});
     }
+    // Older backups and installations kept bookmark metadata in the mutable
+    // paper cache. Expose an independent snapshot until the next cache write
+    // persists it, so loading an old bookmark remains backward compatible.
+    for (const id of Object.keys(state.bookmarks)) {
+      if (!state.savedPapers[id] && state.papers[id]) state.savedPapers[id] = checkedPaper(state.papers[id]);
+    }
     state.events.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp) || a.eventId.localeCompare(b.eventId));
     if (warnings.length) state.storageWarnings = warnings;
     return state;
@@ -216,6 +227,18 @@ class Store {
 
   generation() { return this.queue(() => this.adapter.get(GENERATION, 'initial')); }
 
+  async preserveSavedPaper(id) {
+    // Called under the storage lock, before a bookmark or cache mutation.
+    // A later listing must never silently upgrade the originally saved version.
+    const key = recordPath('savedPapers', id);
+    if (await this.adapter.get(key, null) !== null) return;
+    const current = await this.adapter.get(recordPath('papers', id), null);
+    if (current === null) return;
+    let paper;
+    try { paper = checkedPaper(current, id); } catch { return; }
+    await this.adapter.set(key, paper);
+  }
+
   async writeRecord(kind, id, value) {
     const key = recordPath(kind, id);
     let data = checkedRecord(kind, id, value);
@@ -226,11 +249,46 @@ class Store {
       if (existing === null) throw new Error('This feedback event was deleted. Reload the interest history.');
       data = {...checkedRecord(kind, id, existing), excluded: data.excluded};
     }
+    if (kind === 'bookmarks') await this.preserveSavedPaper(id);
     await this.adapter.set(key, data);
     await this.changed();
   }
 
   set(kind, id, value) { return this.queue(() => this.writeRecord(kind, id, value)); }
+
+  bookmarkPaper(rawPaper, timestamp) {
+    const paper = checkedPaper(rawPaper);
+    const markedAt = checkedRecord('bookmarks', paper.id, timestamp);
+    const bookmarkKey = recordPath('bookmarks', paper.id);
+    const snapshotKey = recordPath('savedPapers', paper.id);
+    const paperKey = recordPath('papers', paper.id);
+    return this.queue(async () => {
+      const existing = await this.adapter.get(bookmarkKey, null);
+      const original = await this.adapter.get(snapshotKey, null);
+      const current = await this.adapter.get(paperKey, null);
+      if (existing !== null) checkedRecord('bookmarks', paper.id, existing);
+      // A deliberate new save pins the supplied version, even if it comes from
+      // an older Saved view. Concurrent repeat saves retain the winning original.
+      const snapshot = existing === null ? paper : checkedPaper(original ?? current ?? paper, paper.id);
+      const writes = [];
+      if (current === null) writes.push([paperKey, paper]);
+      if (existing === null || original === null) writes.push([snapshotKey, snapshot]);
+      writes.push([bookmarkKey, markedAt]);
+      const before = [];
+      for (const [key] of writes) before.push([key, await this.adapter.get(key, null)]);
+      const rollback = {kind:'restore', before};
+      await this.adapter.set(JOURNAL, rollback);
+      try {
+        for (const [key, value] of writes) await this.adapter.set(key, value);
+        await this.changed();
+        await this.adapter.remove(JOURNAL);
+        return snapshot;
+      } catch (error) {
+        await this.finishTransaction(rollback);
+        throw error;
+      }
+    });
+  }
 
   setIfGeneration(kind, id, value, expected) {
     return this.queue(async () => {
@@ -286,14 +344,14 @@ class Store {
   remove(kind, id) {
     const key = recordPath(kind, id);
     if (kind === 'events') throw new Error('Delete all revisions for a paper using the feedback history.');
-    return this.queue(() => this.removeMany([key]));
+    return this.queue(() => this.removeMany(kind === 'bookmarks' ? [key, recordPath('savedPapers', id)] : [key]));
   }
 
   settings(patch) {
     return this.queue(async () => {
       const current = await this.readSettings();
       const value = mergedSettings({...current, ...patch, history: {...current.history, ...patch.history},
-        ai: {...current.ai, ...patch.ai}, paperSpoilers: {...current.paperSpoilers, ...patch.paperSpoilers}});
+        ai: {...current.ai, ...patch.ai}, feeds: {...current.feeds, ...patch.feeds}, paperSpoilers: {...current.paperSpoilers, ...patch.paperSpoilers}});
       await this.adapter.set(SETTINGS, value);
       await this.changed();
       return value;
@@ -303,7 +361,65 @@ class Store {
   cachePapers(papers) {
     const checked = papers.map(paper => checkedPaper(paper));
     return this.queue(async () => {
-      for (const p of checked) await this.adapter.set(recordPath('papers', p.id), p);
+      for (const p of checked) {
+        const bookmarked = await this.adapter.get(recordPath('bookmarks', p.id), null);
+        if (bookmarked !== null) {
+          let valid = false;
+          try { checkedRecord('bookmarks', p.id, bookmarked); valid = true; } catch { /* Leave malformed private records intact. */ }
+          if (valid) await this.preserveSavedPaper(p.id);
+        }
+        await this.adapter.set(recordPath('papers', p.id), p);
+      }
+    });
+  }
+
+  // Public provider observations have their own namespace and export. Resetting
+  // interests or deleting personal feedback never erases the external history.
+  readership() {
+    return this.queue(async () => {
+      const saved = await this.adapter.get(READERSHIP, {schemaVersion:1, observations:[]});
+      const checked = validateObservationFile(saved).observations;
+      const retained = retainObservations(checked);
+      if (JSON.stringify(retained) !== JSON.stringify(checked)) await this.adapter.set(READERSHIP,{schemaVersion:1,observations:retained});
+      return retained;
+    });
+  }
+
+  importReadership(raw) {
+    const incoming = validateObservationFile(raw).observations;
+    if (incoming.some(o => METRIC_DEFINITIONS[o.provider+':'+o.metric].retentionRestricted && ['indexed','metric_unavailable','zero','positive'].includes(o.status))) throw new Error('This build does not archive successful ADS observations. A separately authorized provider-storage integration is required.');
+    return this.queue(async () => {
+      const current = validateObservationFile(await this.adapter.get(READERSHIP, {schemaVersion:1, observations:[]}));
+      const observations = retainObservations([...current.observations, ...incoming]);
+      await this.adapter.set(READERSHIP, {schemaVersion:1, observations});
+      await this.changed();
+      return observations;
+    });
+  }
+
+  clearReadership() { return this.queue(() => this.removeMany([READERSHIP])); }
+
+  cacheFeedPopulation(raw, expectedGeneration, observedAt = Date.now()) {
+    const population = validatePopulationSnapshot({...raw, papers:raw.papers.map(p => checkedPaper(p))});
+    if (!Number.isSafeInteger(observedAt) || observedAt < 0 || observedAt > Date.now()) throw new Error('Invalid population observation time.');
+    return this.queue(async () => {
+      if (expectedGeneration !== undefined && expectedGeneration !== await this.adapter.get(GENERATION,'initial')) return null;
+      const value = {savedAt:observedAt, population};
+      await this.adapter.set(FEED_POPULATION + population.population, value);
+      return value;
+    });
+  }
+
+  feedPopulation(kind, maxAge = 3600000) {
+    if (!['today','recent'].includes(kind)) throw new Error('Unknown feed population.');
+    return this.queue(async () => {
+      const value = await this.adapter.get(FEED_POPULATION + kind, null);
+      if (!value || !Number.isSafeInteger(value.savedAt) || value.savedAt > Date.now()) return null;
+      try {
+        const population = validatePopulationSnapshot({...value.population, papers:value.population.papers.map(p => checkedPaper(p))});
+        if (population.population !== kind) return null;
+        return {population,savedAt:value.savedAt,stale:Date.now()-value.savedAt>=maxAge};
+      } catch { return null; }
     });
   }
 
@@ -337,7 +453,8 @@ class Store {
 
   clearCollection(kind) {
     if (!COLLECTIONS.includes(kind)) throw new Error('Unknown data collection.');
-    return this.queue(async () => this.removeMany((await this.adapter.keys()).filter(key => key.startsWith(PREFIX + kind + ':'))));
+    return this.queue(async () => this.removeMany((await this.adapter.keys()).filter(key =>
+      key.startsWith(PREFIX + kind + ':') || (kind === 'bookmarks' && key.startsWith(PREFIX + 'savedPapers:')))));
   }
 
   clearAll() {
@@ -357,7 +474,8 @@ class Store {
   async import(data) {
     const state = validateImport(data);
     return this.queue(async () => {
-      const oldEvents = (await this.records(['events'])).map(([, , e]) => e);
+      const previous = await this.readState();
+      const oldEvents = previous.events;
       const merged = new Map(oldEvents.map(e => [e.eventId, e]));
       for (const e of state.events) {
         const original = merged.get(e.eventId);
@@ -365,6 +483,13 @@ class Store {
         merged.set(e.eventId, e);
       }
       checkRevisionGraph([...merged.values()]);
+      // An explicit imported snapshot restores that saved version. Legacy
+      // imports preserve an existing bookmark's original snapshot; a newly
+      // imported bookmark captures its imported paper, or the local fallback.
+      for (const id of new Set([...Object.keys(previous.bookmarks), ...Object.keys(state.bookmarks)])) {
+        const paper = previous.savedPapers[id] || state.papers[id] || previous.papers[id];
+        if (!state.savedPapers[id] && paper) state.savedPapers[id] = checkedPaper(paper);
+      }
       const writes = [];
       for (const kind of COLLECTIONS) for (const [id, value] of entriesOf(state, kind)) writes.push([recordPath(kind, id), value]);
       writes.push([SETTINGS, state.settings], [SCHEMA, SCHEMA_VERSION]);
@@ -1048,477 +1173,598 @@ function normalizeCategory(value) {
 
 return {CATEGORIES,normalizeCategory};
 },
-"src/schema.js": (__require) => {
-// Only the fields defined here cross a backup or storage trust boundary.
-const {normalizeCategory, CATEGORIES} = __require("src/categories.js");
-const {listingCounts, listingUrl} = __require("src/parser.js");
+"src/readership.js": (__require) => {
+// External observations are independent of feedback, knowledge, and reading history.
+const {CATEGORIES, normalizeCategory} = __require("src/categories.js");
 
-const SCHEMA_VERSION = 1;
-const COLLECTIONS = ['events', 'papers', 'bookmarks', 'reading', 'subscriptions', 'knowledge', 'glossary', 'selections', 'explanations'];
-const DEFAULT_SETTINGS = {
-  mode: 'random', includeCross: false, includeReplacements: false, exploration: 0.25,
-  personalizedCount: 50, trainRandom: true, useSubscriptions: false,
-  history: {mode: 'all', days: 30, start: '', end: ''}, resetAt: null, noSpoilers: true,
-  paperSpoilers: {}, theme: 'auto', showTools: true,
-  ai: {enabled: false, url: 'http://127.0.0.1:4317', provider: 'local', token: '', model: '', consent: false,
-    dailyRequests: 10, maxInputChars: 100000, maxOutputTokens: 1600, dailyBudget: 1, inputPerMillion: 0, outputPerMillion: 0, profile: 'quick', timeoutSeconds: 420}
-};
+const READERSHIP_SCHEMA_VERSION = 1;
+const OUTCOMES = Object.freeze(['indexed', 'not_indexed', 'metric_unavailable', 'zero', 'positive',
+  'ambiguous_match', 'authentication_failure', 'rate_limit_failure', 'network_failure', 'untested']);
+const DEFAULT_QUALITY = Object.freeze({minCoverage:0.75, minCategoryCoverage:0.25,
+  minMeasured:5, minPositive:3, maxAgeHours:48, minIntervalHours:1, maxIntervalHours:168});
 
-const MODES = ['random', 'balanced', 'personalized', 'discovery', 'subscriptions', 'original'];
-const LEVELS = ['Unfamiliar', 'Introduced', 'Developing', 'Comfortable', 'Proficient', 'Advanced'];
-const SECTIONS = ['new', 'cross', 'replacement'];
-const PAPER_FIELDS = ['title', 'abstract', 'comments', 'journalRef'];
-const MAX_RECORDS = 100000;
-const FORBIDDEN = new Set(['__proto__', 'constructor', 'prototype']);
-const ID = /^(?:\d{2}(?:0[1-9]|1[0-2])\.\d{4,5}|[a-z][a-z-]*\/\d{2}(?:0[1-9]|1[0-2])\d{3})$/;
-const RECORD_ID = /^[a-zA-Z0-9_-]{1,128}$/;
+// A timestamped observation is not evidence of a provider's update frequency.
+// None of the investigated readership providers currently documents a verified
+// cumulative counter. The Rising gate remains closed for these definitions.
+const METRIC_DEFINITIONS = Object.freeze({
+  'ads:read_count':Object.freeze({provider:'ads', metric:'read_count', label:'ADS + arXiv accesses (rolling 90 days)',
+    kind:'accesses', windowKind:'rolling', windowDays:90, definitionVersion:'ads-read-count-2026-11',
+    cumulative:false, source:'https://adsabs.github.io/scixhelp/search-scix/comprehensive-solr-term-list',
+    limitation:'Combined access types; not unique people or a separate PDF-download count.', retentionRestricted:true}),
+  'mendeley:reader_count':Object.freeze({provider:'mendeley', metric:'reader_count', label:'Mendeley library saves',
+    kind:'saves', windowKind:'stock', definitionVersion:'mendeley-reader-count-2026-11', cumulative:false,
+    source:'https://dev.mendeley.com/methods',
+    limitation:'Current library membership; a save does not establish a read or download.', retentionRestricted:false}),
+  'openaire:views':Object.freeze({provider:'openaire', metric:'views', label:'OpenAIRE network views',
+    kind:'views', windowKind:'unknown', definitionVersion:'openaire-usage-counts-2026-11', cumulative:false,
+    source:'https://graph.openaire.eu/docs/data-model/entities/other/',
+    limitation:'Usage reported by participating sources; the Graph field does not specify a measurement window or prove arXiv-site coverage.', retentionRestricted:false}),
+  'openaire:downloads':Object.freeze({provider:'openaire', metric:'downloads', label:'OpenAIRE network downloads',
+    kind:'downloads', windowKind:'unknown', definitionVersion:'openaire-usage-counts-2026-11', cumulative:false,
+    source:'https://graph.openaire.eu/docs/data-model/entities/other/',
+    limitation:'Downloads reported by participating sources; the Graph field does not specify a measurement window or prove arXiv-site coverage.', retentionRestricted:false}),
+  'semantic-scholar:citation_count':Object.freeze({provider:'semantic-scholar', metric:'citation_count', label:'Semantic Scholar citations',
+    kind:'citations', windowKind:'unknown', definitionVersion:'semantic-scholar-citations-2026-11', cumulative:false,
+    source:'https://api.semanticscholar.org/api-docs/graphs',
+    limitation:'Citations measure scholarly attention, not readership; indexing and corrections can change counts.', retentionRestricted:false}),
+  'arcxiv:citation_count':Object.freeze({provider:'arcxiv', metric:'citation_count', label:'ArcXiv citations',
+    kind:'citations', windowKind:'unknown', definitionVersion:'arcxiv-citations-2026-11', cumulative:false,
+    source:'https://arcxiv.org/docs/agents',
+    limitation:'Citations are not readership. AI quality signals are never admitted as observed attention.', retentionRestricted:false})
+});
 
-function check(ok, label) {
-  if (!ok) throw new Error('Invalid ' + label + '.');
-}
-
-function obj(value, label) {
-  check(value !== null && typeof value === 'object' && !Array.isArray(value) &&
-    [Object.prototype, null].includes(Object.getPrototypeOf(value)), label);
-  return value;
-}
-
-function list(value, label, maximum = MAX_RECORDS) {
-  check(Array.isArray(value) && value.length <= maximum, label);
-  return value;
-}
-
-function str(value, label, max, required = false) {
-  check(typeof value === 'string' && value.length <= max && (!required || value.trim().length > 0), label);
-  return value;
-}
-
-function number(value, label, min, max, integer = false) {
-  check(Number.isFinite(value) && value >= min && value <= max && (!integer || Number.isSafeInteger(value)), label);
-  return value;
-}
-
-function choice(value, options, label) {
-  check(options.includes(value), label);
-  return value;
-}
-
-function bool(value, label) { return choice(value, [true, false], label); }
-
-function optional(value, validate) { return value == null ? null : validate(value); }
-
-function recordKey(value) {
-  str(value, 'record key', 1024, true);
-  if (FORBIDDEN.has(value)) throw new Error('Unsafe key in data.');
-  check(!/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value), 'record key');
-  return value;
-}
-
-function pid(value) {
-  check(typeof value === 'string' && value.length <= 80 && ID.test(value), 'arXiv paper identifier');
-  return value;
-}
-
-function uid(value) {
-  check(typeof value === 'string' && RECORD_ID.test(value), 'record identifier');
-  return recordKey(value);
-}
-
-function date(value) {
-  check(typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value), 'calendar date');
-  const at = Date.parse(value);
-  check(Number.isFinite(at) && new Date(at).toISOString().slice(0, 10) === value, 'calendar date');
-  return value;
-}
-
-function timestamp(value) {
-  check(typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value), 'timestamp');
-  date(value.slice(0, 10));
-  check(Number.isFinite(Date.parse(value)), 'timestamp');
-  return value;
-}
-
-function probability(value) { return optional(value, x => number(x, 'selection probability', 0, 1)); }
-
-function category(value) {
-  const code = normalizeCategory(value);
-  check(Boolean(code), 'arXiv category');
-  return code;
-}
-
-function url(value, label) {
-  str(value, label, 10000, true);
-  check(!/[\u0000-\u001f\\]/.test(value), label);
-  let parsed;
-  try { parsed = new URL(value); } catch { throw new Error('Invalid ' + label + '.'); }
-  check(['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password, label);
-  return parsed;
-}
-
-function paperLink(value, kind, id, version, allowFragment = false) {
-  const link = url(value, 'paper source link');
-  const expected = '/' + kind + '/' + id;
-  const versioned = version ? expected + 'v' + version : expected;
-  check(link.origin === 'https://arxiv.org' && !link.search &&
-    (link.pathname === expected || link.pathname === versioned) &&
-    (!link.hash || (allowFragment && /^#(?:[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,120}|page=[1-9]\d{0,4})$/.test(link.hash))), 'paper source link');
-  return link.href;
-}
-
-function author(value) {
-  const a = obj(value, 'author');
-  let href = null;
-  if (a.url != null && a.url !== '') {
-    const link = url(a.url, 'author link');
-    const profile = link.origin === 'https://arxiv.org' && /^\/(?:search(?:\/|$)|a\/[a-z0-9_-]+_\d+(?:\.html)?\/?$)/i.test(link.pathname);
-    const orcid = link.origin === 'https://orcid.org' && /^\/\d{4}-\d{4}-\d{4}-\d{3}[\dX]\/?$/i.test(link.pathname) && !link.search;
-    check(profile || orcid, 'author identity link');
-    href = link.href;
+const ID=/^(?:\d{2}(?:0[1-9]|1[0-2])\.\d{4,5}|[a-z][a-z-]*\/\d{2}(?:0[1-9]|1[0-2])\d{3})$/;
+const measuredStatuses=new Set(['zero','positive']);
+const matchedStatuses=new Set(['indexed','metric_unavailable','zero','positive']);
+// An imported observation may name a supported provider, but that must not turn
+// an unrelated destination into a trusted-looking "Provider record" link.
+const PROVIDER_SOURCE_HOSTS=Object.freeze({
+  ads:['adsabs.harvard.edu','ui.adsabs.harvard.edu','api.adsabs.harvard.edu','scixplorer.org','www.scixplorer.org','adsabs.github.io'],
+  mendeley:['mendeley.com','www.mendeley.com','api.mendeley.com','dev.mendeley.com'],
+  openaire:['openaire.eu','www.openaire.eu','api.openaire.eu','explore.openaire.eu','graph.openaire.eu','usagecounts.openaire.eu'],
+  'semantic-scholar':['semanticscholar.org','www.semanticscholar.org','api.semanticscholar.org'],
+  arcxiv:['arcxiv.org','www.arcxiv.org']
+});
+const CREDENTIAL_QUERY_KEYS=new Set(['key','apikey','xapikey','accesskey','accesskeyid','awsaccesskeyid','subscriptionkey','privatekey','password','passwd','pass',
+  'authorization','auth','authcode','authorizationcode','bearer','jwt','secret','clientsecret','token','accesstoken','refreshtoken','idtoken','oauth',
+  'oauthcode','code','credential','credentials','signature','sig','session','sessionid','sessionkey','sessiontoken']);
+const PROVIDER_PUBLIC_QUERY_KEYS=Object.freeze({
+  ads:['q','fl','rows','start','sort','bibcode'],
+  mendeley:['arxiv','view','id','doi'],
+  openaire:['filter','page','pagesize','pid','doi','id','query','search','keywords'],
+  'semantic-scholar':['fields','limit','offset'],
+  arcxiv:[]
+});
+const plain=value=>value!==null&&typeof value==='object'&&!Array.isArray(value)&&[Object.prototype,null].includes(Object.getPrototypeOf(value));
+function requireValue(ok,label){if(!ok)throw new Error('Invalid readership '+label+'.');}
+function text(value,label,maximum=1000){requireValue(typeof value==='string'&&value.length<=maximum&&!/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value),label);return value;}
+function instant(value,label){requireValue(typeof value==='string'&&/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?(?:Z|[+-]\d\d:\d\d)$/.test(value)&&Number.isFinite(Date.parse(value)),label);return new Date(value).toISOString();}
+function finite(value,label,min=0,max=Number.MAX_SAFE_INTEGER){requireValue(Number.isFinite(value)&&value>=min&&value<=max,label);return value;}
+function safeUrl(value,provider){
+  if(value==null)return null;
+  const url=new URL(text(value,'source URL',2048));
+  requireValue(url.protocol==='https:'&&!url.username&&!url.password&&!url.hash&&!url.port&&
+    PROVIDER_SOURCE_HOSTS[provider]?.includes(url.hostname),'provider source URL');
+  for(const name of url.searchParams.keys()){
+    const key=name.toLowerCase().replace(/[^a-z0-9]/g,'');
+    requireValue(!CREDENTIAL_QUERY_KEYS.has(key)&&!/(?:token|password|passwd|secret|credential|signature)/.test(key),
+      'credential-bearing source URL');
+    requireValue(PROVIDER_PUBLIC_QUERY_KEYS[provider]?.includes(key),'provider source URL parameter');
   }
-  const stableId = optional(a.stableId, id => {
-    check(typeof id === 'string' && id.length <= 512 && /^(?:arxiv:[a-z0-9_-]+_\d+|orcid:\d{4}-\d{4}-\d{4}-\d{3}[\dX])$/i.test(id), 'author identity');
-    return id;
-  });
-  return {name: str(a.name, 'author name', 4000, true), url: href, stableId};
+  return url.href;
 }
 
-function recordMap(value, label, read) {
-  const entries = Object.entries(obj(value, label));
-  check(entries.length <= MAX_RECORDS, label);
-  // Object.fromEntries defines own properties and never invokes inherited setters.
-  return Object.fromEntries(entries.map(([key, data]) => [recordKey(key), read(data, key)]));
+function normalizeObservationId(raw) {
+  if(typeof raw!=='string')return null;
+  const id=raw.trim().replace(/^https?:\/\/(?:www\.)?arxiv\.org\/(?:abs|pdf|html)\//i,'').replace(/^arxiv:\s*/i,'')
+    .replace(/\.pdf$/i,'').replace(/v[1-9]\d*$/i,'').replace(/\.[a-z]{2}(?=\/)/i,'').toLowerCase();
+  return ID.test(id)?id:null;
 }
 
-function checkedPaper(value, key = value?.id) {
-  const p = obj(value, 'paper');
-  const id = pid(p.id);
-  check(key === id, 'paper key');
-  const version = number(p.version ?? 0, 'paper version', 0, 9999999, true);
-  const versionedId = version ? id + 'v' + version : id;
-  check(p.versionedId === undefined || p.versionedId === versionedId, 'versioned paper identifier');
-  const links = obj(p.links ?? {}, 'paper links');
-  const result = {
-    id, version, versionedId, title: str(p.title, 'paper title', 16000),
-    authors: list(p.authors, 'paper authors').map(author),
-    categories: list(p.categories, 'paper categories', 512).map(category),
-    primaryCategory: optional(p.primaryCategory, category), abstract: str(p.abstract ?? '', 'abstract', 160000),
-    comments: str(p.comments ?? '', 'paper comments', 160000), journalRef: str(p.journalRef ?? '', 'journal reference', 160000),
-    announcementDate: optional(p.announcementDate, date), section: optional(p.section, s => choice(s, SECTIONS, 'submission section')),
-    links: {
-      abstract: paperLink(links.abstract ?? 'https://arxiv.org/abs/' + versionedId, 'abs', id, version),
-      pdf: paperLink(links.pdf ?? 'https://arxiv.org/pdf/' + versionedId, 'pdf', id, version),
-      html: optional(links.html, href => paperLink(href, 'html', id, version))
-    }
-  };
-  if (p.inlineLinks !== undefined) {
-    const fields = obj(p.inlineLinks, 'inline paper links');
-    result.inlineLinks = {};
-    for (const field of PAPER_FIELDS) {
-      if (fields[field] === undefined) continue;
-      let previous = 0;
-      result.inlineLinks[field] = list(fields[field], 'inline links', 10000).map(item => {
-        obj(item, 'inline link');
-        const start = number(item.start, 'inline link start', previous, result[field].length, true);
-        const end = number(item.end, 'inline link end', start + 1, result[field].length, true);
-        previous = end;
-        return {start, end, url: url(item.url, 'inline link URL').href};
-      });
+function validateObservation(raw) {
+  requireValue(plain(raw),'observation');
+  const paperId=normalizeObservationId(raw.paperId);
+  requireValue(Boolean(paperId),'paper identifier');
+  const definition=METRIC_DEFINITIONS[`${raw.provider}:${raw.metric}`];
+  requireValue(Boolean(definition),'provider and metric');
+  requireValue(OUTCOMES.includes(raw.status),'outcome');
+  const status=raw.status;
+  const measured=measuredStatuses.has(status),matched=matchedStatuses.has(status);
+  const value=raw.value??null;
+  if(measured){finite(value,'metric value');requireValue(Number.isSafeInteger(value),'integer metric count');requireValue(status==='zero'?value===0:value>0,'metric outcome');}
+  else requireValue(value===null,'missing metric value');
+  requireValue(!matched||raw.match==='exact_identifier','identity match');
+  requireValue(raw.match==null||raw.match==='exact_identifier','identity match');
+  const observedAt=instant(raw.observedAt,'observation timestamp');
+  const providerUpdatedAt=raw.providerUpdatedAt==null?null:instant(raw.providerUpdatedAt,'provider timestamp');
+  requireValue(!providerUpdatedAt||Date.parse(providerUpdatedAt)<=Date.parse(observedAt)+300000,'provider timestamp');
+  const definitionVersion=raw.definitionVersion??definition.definitionVersion;
+  requireValue(definitionVersion===definition.definitionVersion,'metric definition version');
+  const defaultWindow={kind:definition.windowKind,days:definition.windowDays??null,start:null,end:null};
+  const window=raw.window??defaultWindow;
+  requireValue(plain(window)&&window.kind===definition.windowKind,'measurement window');
+  requireValue((window.days??null)===(definition.windowDays??null),'measurement window length');
+  const start=window.start==null?null:instant(window.start,'window start'),end=window.end==null?null:instant(window.end,'window end');
+  requireValue(!start||!end||Date.parse(start)<Date.parse(end),'measurement window order');
+  requireValue(!end||Date.parse(end)<=Date.parse(observedAt)+300000,'measurement window end');
+  requireValue(raw.corrected===undefined||typeof raw.corrected==='boolean','correction flag');
+  return {paperId,provider:definition.provider,metric:definition.metric,status,value,observedAt,providerUpdatedAt,
+    window:{kind:definition.windowKind,days:definition.windowDays??null,start,end},definitionVersion,
+    providerRecordId:raw.providerRecordId==null?null:text(raw.providerRecordId,'provider record identifier',500),
+    sourceUrl:safeUrl(raw.sourceUrl,definition.provider),match:matched?'exact_identifier':null,
+    corrected:raw.corrected===true,counterEpoch:raw.counterEpoch==null?null:text(raw.counterEpoch,'counter epoch',200),
+    error:raw.error==null?null:text(raw.error,'diagnostic',2000)};
+}
+
+function validateObservationFile(raw) {
+  requireValue(plain(raw)&&raw.schemaVersion===READERSHIP_SCHEMA_VERSION,'snapshot schema');
+  requireValue(Array.isArray(raw.observations)&&raw.observations.length<=100000,'snapshot size');
+  const observations=raw.observations.map(validateObservation);
+  return {schemaVersion:READERSHIP_SCHEMA_VERSION,observations};
+}
+const validateSnapshot=validateObservationFile;
+
+function retainObservations(raw,{now=Date.now(),retentionDays=30,maxRecords=50000}={}) {
+  finite(now,'retention clock');finite(retentionDays,'retention days',1,365);finite(maxRecords,'retention size',1,100000);
+  const cutoff=now-retentionDays*86400000,map=new Map();
+  for(const candidate of raw){const observation=validateObservation(candidate),time=Date.parse(observation.observedAt);
+    if(time<cutoff||time>now+300000)continue;
+    // Keep conflicts. The latest-observation resolver marks them ambiguous.
+    const key=JSON.stringify(observation);map.set(key,observation);
+  }
+  return [...map.values()].sort((a,b)=>b.observedAt.localeCompare(a.observedAt)||a.paperId.localeCompare(b.paperId)).slice(0,maxRecords);
+}
+
+function normalizePopulation(population,options={}) {
+  const source=Array.isArray(population)?{papers:population,population:options.population,complete:options.populationComplete}:population;
+  const seen=new Set(),papers=[];let invalid=!Array.isArray(source?.papers);
+  for(const paper of source?.papers||[]){const id=normalizeObservationId(paper?.id);if(!id||id!==paper.id||seen.has(id)){invalid=true;continue;}seen.add(id);papers.push({...paper,id});}
+  if(source?.distinctTotal!==undefined&&source.distinctTotal!==null&&source.distinctTotal!==papers.length)invalid=true;
+  if(source?.counts?.total!==undefined&&source.counts.total!==papers.length)invalid=true;
+  return {...source,papers,complete:source?.complete===true&&!invalid,populationIntegrity:invalid?'Invalid or duplicate identifiers, or inconsistent distinct-population counts.':null};
+}
+function optionsWithDefaults(options) {
+  const result={...DEFAULT_QUALITY,...options};
+  for(const key of ['minCoverage','minCategoryCoverage'])finite(result[key],key,0,1);
+  for(const key of ['minMeasured','minPositive'])finite(result[key],key,1,100000);
+  finite(result.maxAgeHours,'freshness hours',0.01,720);finite(result.minIntervalHours,'minimum observation interval',0.01,720);
+  finite(result.maxIntervalHours,'maximum observation interval',result.minIntervalHours,8760);
+  result.now=typeof result.now==='string'?Date.parse(result.now):result.now??Date.now();finite(result.now,'clock');
+  return result;
+}
+function latestObservations(observations,provider,metric) {
+  const map=new Map();
+  for(const raw of observations||[]) {
+    const observation=validateObservation(raw);
+    if(observation.provider!==provider||observation.metric!==metric)continue;
+    const previous=map.get(observation.paperId);
+    if(!previous||observation.observedAt>previous.observedAt)map.set(observation.paperId,observation);
+    else if(observation.observedAt===previous.observedAt&&JSON.stringify(observation)!==JSON.stringify(previous)) {
+      map.set(observation.paperId,{...observation,status:'ambiguous_match',value:null,match:null,error:'Conflicting observations share the same timestamp.'});
     }
   }
+  return map;
+}
+function fresh(observation,options) {
+  if(!observation)return false;
+  const time=Date.parse(observation.observedAt),updated=observation.providerUpdatedAt?Date.parse(observation.providerUpdatedAt):time;
+  return time<=options.now+300000&&time>=options.now-options.maxAgeHours*3600000&&updated>=options.now-options.maxAgeHours*3600000;
+}
+const ratio=(numerator,denominator)=>({numerator,denominator,percentage:denominator?numerator/denominator*100:null});
+function categoryList(paper){return [...new Set((paper.categories||[]).map(normalizeCategory).filter(c=>Object.hasOwn(CATEGORIES,c)))];}
+function countCoverage(papers,map,options) {
+  let matched=0,measured=0,positive=0,freshMeasured=0;
+  const outcomes=Object.fromEntries(OUTCOMES.map(outcome=>[outcome,0]));
+  for(const paper of papers){const observation=map.get(paper.id),status=observation?.status||'untested';outcomes[status]++;
+    if(matchedStatuses.has(status))matched++;
+    if(measuredStatuses.has(status)){measured++;if(observation.value>0)positive++;if(fresh(observation,options))freshMeasured++;}
+  }
+  const unresolved=outcomes.ambiguous_match+outcomes.authentication_failure+outcomes.rate_limit_failure+outcomes.network_failure+outcomes.untested;
+  return {total:papers.length,matched,measured,positive,freshMeasured,unresolved,outcomes,
+    indexing:ratio(matched,papers.length),metric:ratio(measured,papers.length),positiveActivity:ratio(positive,papers.length),
+    conditionalMetric:ratio(measured,matched),conditionalPositive:ratio(positive,measured),freshMetric:ratio(freshMeasured,papers.length),
+    // Bounds make clear that unresolved requests are not confirmed misses.
+    indexingBounds:{minimum:ratio(matched,papers.length),maximum:ratio(matched+unresolved,papers.length)},
+    metricBounds:{minimum:ratio(measured,papers.length),maximum:ratio(measured+unresolved,papers.length)}};
+}
+
+function coverageReport(population,observations,options={}) {
+  const config=optionsWithDefaults(options),source=normalizePopulation(population,config);
+  const map=latestObservations(observations,config.provider,config.metric),papers=source.papers;
+  const report=countCoverage(papers,map,config);
+  report.byCategory=Object.fromEntries(Object.keys(CATEGORIES).map(category=>[category,countCoverage(papers.filter(p=>categoryList(p).includes(category)),map,config)]));
+  const groupBy=fn=>{const groups=new Map();for(const paper of papers){const key=fn(paper);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(paper);}return Object.fromEntries([...groups].map(([key,rows])=>[key,countCoverage(rows,map,config)]));};
+  report.byAnnouncementDate=groupBy(p=>p.announcementDate||'unknown');
+  report.bySubmissionType=groupBy(p=>p.section||'unknown');
+  report.byAgeDays=groupBy(p=>p.announcementDate?String(Math.floor((config.now-Date.parse(p.announcementDate+'T00:00:00Z'))/86400000)):'unknown');
+  report.provider=config.provider??null;report.metricType=config.metric??null;
+  report.population=source.population??'unknown';report.populationComplete=source.complete===true;
+  return report;
+}
+
+function quality(source,observations,config,definition) {
+  const reasons=[],coverage=coverageReport(source,observations,config),map=latestObservations(observations,config.provider,config.metric);
+  if(source.population!=='recent')reasons.push('Trending and Rising require the authoritative arXiv Recent population.');
+  if(source.complete!==true)reasons.push('The Recent population is incomplete; coverage denominators are not verified.');
+  if(!definition)reasons.push('Choose a supported provider and observed metric.');
+  const eligible=source.papers.map(p=>({paper:p,observation:map.get(p.id)})).filter(({observation:o})=>o&&measuredStatuses.has(o.status)&&fresh(o,config));
+  if(coverage.freshMeasured<config.minMeasured)reasons.push(`Only ${coverage.freshMeasured} papers have recently retrieved measurements; at least ${config.minMeasured} are required. Provider update freshness is disclosed separately.`);
+  if(!coverage.total||coverage.freshMeasured/coverage.total<config.minCoverage)reasons.push(`Recent-observation coverage is below the configured ${Math.round(config.minCoverage*100)}% minimum.`);
+  if(eligible.filter(({observation:o})=>o.value>0).length<config.minPositive)reasons.push('Too few papers have positive observed activity.');
+  if(new Set(eligible.map(({observation:o})=>o.value)).size<2)reasons.push('Available measurements do not discriminate between papers.');
+  const gaps=Object.entries(coverage.byCategory).filter(([,c])=>c.total&&c.freshMeasured/c.total<config.minCategoryCoverage).map(([category])=>category);
+  if(gaps.length)reasons.push(`Insufficient category coverage: ${gaps.join(', ')}.`);
+  return {reasons,coverage,eligible};
+}
+function baseResult(definition,coverage,reasons) {
+  return {available:reasons.length===0,entries:[],coverage,reasons,metricDefinition:definition??null,
+    label:definition?.label??'Observed readership',
+    message:reasons.length?'Insufficient readership data to establish a meaningful trending ranking.':null,
+    ageDisclosure:'Raw counts are compared within the current Recent population. Older announcements may have had longer to accumulate attention; no unsupported age correction is applied.',
+    freshnessDisclosure:'Observation time is shown separately from the provider update time. An unknown provider update time does not establish fresh underlying activity.'};
+}
+
+function rankTrending(population,observations=[],options={}) {
+  const config=optionsWithDefaults(options),source=normalizePopulation(population,config),definition=METRIC_DEFINITIONS[`${config.provider}:${config.metric}`];
+  const {reasons,coverage,eligible}=quality(source,observations,config,definition),result=baseResult(definition,coverage,reasons);
+  if(!result.available)return result;
+  eligible.sort((a,b)=>b.observation.value-a.observation.value||a.paper.id.localeCompare(b.paper.id));
+  let rank=0,last=null;
+  result.entries=eligible.map(({paper,observation},index)=>{if(observation.value!==last){rank=index+1;last=observation.value;}
+    return {paperId:paper.id,rank,value:observation.value,observation,announcementDate:paper.announcementDate??null,
+      ageDays:paper.announcementDate?Math.floor((config.now-Date.parse(paper.announcementDate+'T00:00:00Z'))/86400000):null};});
   return result;
 }
 
-function mergedSettings(raw = {}, portable = false) {
-  const s = {...DEFAULT_SETTINGS, ...obj(raw, 'settings')};
-  const h = {...DEFAULT_SETTINGS.history, ...obj(s.history, 'history settings')};
-  const a = {...DEFAULT_SETTINGS.ai, ...obj(s.ai, 'AI settings')};
-  const result = {
-    mode: choice(s.mode, MODES, 'recommendation mode'), exploration: number(s.exploration, 'exploration', 0, 1),
-    personalizedCount: number(s.personalizedCount, 'daily count', 1, 200, true),
-    theme: choice(s.theme, ['auto', 'light', 'dark'], 'theme'),
-    history: {mode: choice(h.mode, ['all', 'none', 'lastDays', 'ignoreLastDays', 'before', 'after', 'excludeRange'], 'history mode'),
-      days: number(h.days, 'training window days', 1, 36500, true), start: h.start === '' ? '' : date(h.start), end: h.end === '' ? '' : date(h.end)},
-    resetAt: optional(s.resetAt, timestamp),
-    paperSpoilers: recordMap(s.paperSpoilers, 'paper protections', (v, key) => { pid(key); return bool(v, 'paper protection'); })
-  };
-  for (const field of ['includeCross', 'includeReplacements', 'trainRandom', 'useSubscriptions', 'noSpoilers', 'showTools']) result[field] = bool(s[field], field);
-  if (s.previousMode !== undefined) result.previousMode = choice(s.previousMode, MODES.filter(mode => mode !== 'original'), 'previous recommendation mode');
-  check(h.mode !== 'excludeRange' || (h.start && h.end && h.start <= h.end), 'history date range');
-  check(!['before', 'after'].includes(h.mode) || h.start || h.end, 'history cutoff date');
-  check(typeof a.url === 'string' && /^http:\/\/127\.0\.0\.1(?::[1-9]\d{0,4})?\/?$/.test(a.url), 'loopback bridge origin');
-  const bridge = url(a.url, 'loopback bridge origin');
-  const model = str(a.model, 'AI model', 128);
-  check(!model || /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(model), 'AI model');
-  const token = portable ? '' : str(a.token, 'bridge pairing token', 256);
-  check(!token || /^[a-zA-Z0-9_-]{32,256}$/.test(token), 'bridge pairing token');
-  result.ai = {url: bridge.origin, provider: choice(a.provider, ['local', 'openai', 'gemini'], 'AI provider'), model, token,
-    enabled: portable ? false : bool(a.enabled, 'AI enabled flag'), consent: portable ? false : bool(a.consent, 'AI consent'),
-    profile: choice(a.profile, ['quick', 'full'], 'AI reading profile'),
-    timeoutSeconds: number(a.timeoutSeconds, 'AI request timeout', 60, 600, true),
-    dailyRequests: number(a.dailyRequests, 'daily request limit', 0, 10000, true),
-    maxInputChars: number(a.maxInputChars, 'source character limit', 256, 120000, true),
-    maxOutputTokens: number(a.maxOutputTokens, 'output token limit', 64, 8192, true),
-    dailyBudget: number(a.dailyBudget, 'daily budget', 0, 10000),
-    inputPerMillion: number(a.inputPerMillion, 'input price', 0, 10000), outputPerMillion: number(a.outputPerMillion, 'output price', 0, 10000)};
+// This pure calculation is also available for future independently documented
+// cumulative providers. The current registry intentionally admits none to Rising.
+function cumulativeGrowth(previous,current,definition,{minIntervalHours=1,maxIntervalHours=168}={}) {
+  if(!definition?.cumulative||definition.windowKind!=='cumulative'||!['views','downloads','accesses','readers'].includes(definition.kind))return null;
+  if(!previous||!current||previous.paperId!==current.paperId||previous.provider!==current.provider||previous.metric!==current.metric||
+    previous.definitionVersion!==current.definitionVersion||previous.counterEpoch!==current.counterEpoch||previous.corrected||current.corrected||
+    !measuredStatuses.has(previous.status)||!measuredStatuses.has(current.status))return null;
+  if(previous.window?.kind!=='cumulative'||current.window?.kind!=='cumulative'||previous.window.start!==current.window.start||previous.window.days!==current.window.days)return null;
+  const intervalHours=(Date.parse(current.observedAt)-Date.parse(previous.observedAt))/3600000;
+  if(!Number.isFinite(intervalHours)||intervalHours<minIntervalHours||intervalHours>maxIntervalHours||current.value<previous.value)return null;
+  return {velocity:(current.value-previous.value)/intervalHours,change:current.value-previous.value,intervalHours};
+}
+
+function rankRising(population,observations=[],options={}) {
+  const config=optionsWithDefaults(options),source=normalizePopulation(population,config),definition=METRIC_DEFINITIONS[`${config.provider}:${config.metric}`];
+  const {reasons,coverage,eligible}=quality(source,observations,config,definition),result=baseResult(definition,coverage,reasons);
+  if(!definition?.cumulative||definition.windowKind!=='cumulative')result.reasons.push('This provider has no independently verified cumulative readership counter; rolling windows, current saves, and unknown windows cannot establish readership growth.');
+  const rows=[];
+  if(definition?.cumulative)for(const {paper,observation} of eligible){
+    const previous=observations.map(validateObservation).filter(o=>o.paperId===paper.id&&o.provider===observation.provider&&o.metric===observation.metric&&o.observedAt<observation.observedAt)
+      .sort((a,b)=>b.observedAt.localeCompare(a.observedAt))[0];
+    const growth=cumulativeGrowth(previous,observation,definition,config);
+    if(growth)rows.push({paperId:paper.id,value:observation.value,observation,previousObservation:previous,...growth});
+  }
+  if(rows.length<config.minMeasured||rows.filter(row=>row.velocity>0).length<config.minPositive)result.reasons.push('Insufficient comparable historical observations for a Rising ranking.');
+  if(new Set(rows.map(row=>row.velocity)).size<2)result.reasons.push('Observed growth does not discriminate between papers.');
+  result.available=result.reasons.length===0;
+  result.message=result.available?null:'Insufficient historical readership data to establish a meaningful rising ranking.';
+  if(result.available){rows.sort((a,b)=>b.velocity-a.velocity||a.paperId.localeCompare(b.paperId));let rank=0,last=null;result.entries=rows.map((row,index)=>{if(row.velocity!==last){rank=index+1;last=row.velocity;}return {...row,rank};});}
   return result;
 }
 
-function feedback(value, key) {
-  const e = obj(value, 'feedback event');
-  check(uid(e.eventId) === key, 'feedback event key');
-  const paper = checkedPaper(e.paper, pid(e.paperId));
-  check((e.version ?? paper.version) === paper.version, 'feedback paper version');
-  const event = {eventId: key, paperId: paper.id, version: paper.version, timestamp: timestamp(e.timestamp),
-    value: choice(e.value, ['like', 'dislike', 'background', 'neutral', 'removed'], 'feedback value'),
-    reason: str(e.reason ?? '', 'feedback reason', 8000), mode: choice(e.mode, MODES, 'feedback mode'),
-    selectionProbability: probability(e.selectionProbability), revisionOf: optional(e.revisionOf, uid),
-    excluded: bool(e.excluded ?? false, 'feedback exclusion'), paper};
-  if (e.features !== undefined) {
-    const f = obj(e.features, 'feedback features');
-    check(f.schema === 'math-content-v1', 'feature schema');
-    event.features = {schema: f.schema, entries: list(f.entries, 'feature entries', 4000).map(entry => {
-      check(Array.isArray(entry) && entry.length === 2, 'feature entry');
-      return [str(entry[0], 'feature name', 256, true), number(entry[1], 'feature weight', 0, 8)];
-    })};
+return {READERSHIP_SCHEMA_VERSION,OUTCOMES,DEFAULT_QUALITY,METRIC_DEFINITIONS,normalizeObservationId,validateObservation,validateObservationFile,validateSnapshot,retainObservations,coverageReport,rankTrending,cumulativeGrowth,rankRising};
+},
+"src/network.js": (__require) => {
+const { listingCounts, listingUrl, parseListing } = __require("src/parser.js");
+
+const STATUS_BLOCKS_MORE_REQUESTS = new Set([401, 403, 429, 503]);
+
+// The caller validates paper fields (checkedPaper) at its storage boundary.
+// This validates the population envelope and recomputes completeness rather
+// than trusting persisted counts or a persisted `complete: true` flag.
+function validatePopulationSnapshot(raw) {
+  const fail = message => { throw new Error('Invalid population snapshot: ' + message + '.'); };
+  const plain = value => value && typeof value === 'object' && !Array.isArray(value) &&
+    [Object.prototype, null].includes(Object.getPrototypeOf(value));
+  const integer = (value, minimum=0) => Number.isSafeInteger(value) && value >= minimum && value <= 100000;
+  const day = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+    Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0,10) === value && value >= '1991-01-01';
+  if (!plain(raw)) fail('object required');
+  const baseUrl = listingUrl(raw.baseUrl, raw.baseUrl);
+  const recent = baseUrl && new URL(baseUrl).pathname.endsWith('/recent');
+  if (!baseUrl || raw.population !== (recent ? 'recent' : 'today')) fail('source identity');
+  if (raw.complete !== true || !Array.isArray(raw.warnings) || raw.warnings.length ||
+      !Array.isArray(raw.integrityWarnings) || raw.integrityWarnings.length ||
+      !Array.isArray(raw.nextUrls) || raw.nextUrls.length) fail('unfinished population');
+  if (!Array.isArray(raw.papers) || raw.papers.length > 100000 || !integer(raw.advertisedTotal)) fail('population size');
+  const papers = new Map();
+  for (const paper of raw.papers) {
+    if (!plain(paper) || typeof paper.id !== 'string' || !paper.id || papers.has(paper.id) || !day(paper.announcementDate) ||
+        ![null,'new','cross','replacement'].includes(paper.section) || !Number.isSafeInteger(paper.version) || paper.version < 0) fail('unique dated paper metadata');
+    papers.set(paper.id,paper);
   }
-  return event;
-}
-
-function subscription(value, key) {
-  const s = obj(value, 'author subscription');
-  check(uid(s.id) === key, 'subscription key');
-  return {id: key, ...author(s), createdAt: timestamp(s.createdAt), notes: str(s.notes ?? '', 'author notes', 100000),
-    confirmedNameOnly: bool(s.confirmedNameOnly ?? false, 'name-only confirmation')};
-}
-
-function knowledge(value) {
-  function level(item) {
-    obj(item, 'knowledge level');
-    return {level: choice(item.level, LEVELS, 'knowledge level'), updatedAt: timestamp(item.updatedAt)};
+  const counts = listingCounts(raw.papers);
+  if (!plain(raw.counts) || Object.keys(counts).some(key=>raw.counts[key]!==counts[key])) fail('paper counts');
+  if (!plain(raw.sectionTotals)) fail('section totals');
+  for (const [section,count] of Object.entries(raw.sectionTotals)) {
+    if (!['new','cross','replacement'].includes(section) || !integer(count) || (!recent && counts[section] !== count)) fail('section total');
   }
-  const entry = level(value);
-  if (value.history !== undefined) entry.history = list(value.history, 'knowledge history').map(level);
-  return entry;
-}
-
-function source(value, id, version) {
-  const s = obj(value, 'explanation source');
-  const kind = choice(s.kind, ['html', 'pdf', 'abstract'], 'source kind');
-  const route = kind === 'abstract' ? 'abs' : kind;
-  const href = paperLink(s.url, route, id, version);
-  const result = {kind, url: href, note: str(s.note ?? '', 'source note', 3200)};
-  if (s.citations !== undefined) {
-    result.citations = list(s.citations, 'source citations', 128).map(c => {
-      obj(c, 'citation');
-      const link = paperLink(c.url, route, id, version, true);
-      check(link.split('#')[0] === href, 'citation source');
-      return {label: str(c.label, 'citation label', 260), url: link,
-        quotes: list(c.quotes ?? [], 'citation quotes', 8).map(q => str(q, 'evidence quote', 320))};
-    });
-  }
-  return result;
-}
-
-function glossary(value, key) {
-  const g = obj(value, 'glossary entry');
-  const paperId = pid(g.paperId);
-  const versioned = key.split(':', 1)[0];
-  const version = versioned === paperId ? 0 : Number(versioned.slice(paperId.length + 1));
-  check(versioned === paperId || (Number.isSafeInteger(version) && version > 0 && versioned === paperId + 'v' + version), 'glossary paper key');
-  const term = str(g.term, 'glossary term', 500, true);
-  check(key.length > versioned.length + 1, 'glossary term key');
-  const entry = {term, paperId, answer: str(g.answer, 'glossary answer', 64000),
-    status: choice(g.status ?? 'unfamiliar', ['unfamiliar', 'partial', 'understood'], 'glossary status'),
-    updatedAt: timestamp(g.updatedAt), visits: number(g.visits ?? 1, 'glossary visits', 0, Number.MAX_SAFE_INTEGER, true)};
-  if (g.visitHistory !== undefined) entry.visitHistory = list(g.visitHistory, 'glossary visits').map(timestamp);
-  if (g.source !== undefined) entry.source = source(g.source, paperId, version);
-  return entry;
-}
-
-function explanation(value, key) {
-  const v = obj(value, 'cached explanation');
-  const paperId = pid(v.paperId);
-  const version = number(v.version, 'source version', 0, 9999, true);
-  const prefix = 'ai:' + paperId + ':v' + version + ':';
-  check(key.startsWith(prefix) && /^[a-f0-9]{64}$/.test(key.slice(prefix.length)), 'explanation cache key');
-  const entry = {paperId, version, text: str(v.text, 'cached explanation', 64000, true), source: source(v.source, paperId, version),
-    savedAt: number(v.savedAt, 'cache timestamp', 0, 8640000000000000, true)};
-  if (v.usage !== undefined) {
-    const usage = obj(v.usage, 'AI usage');
-    entry.usage = {};
-    for (const k of ['inputTokens', 'outputTokens', 'estimatedCostUsd', 'dailyRequests', 'dailyCostUsd']) {
-      if (usage[k] !== undefined) entry.usage[k] = number(usage[k], 'usage quantity', 0, Number.MAX_SAFE_INTEGER);
+  if (!recent) {
+    if (!day(raw.announcementDate) || counts.total !== raw.advertisedTotal ||
+        raw.papers.some(p=>p.announcementDate!==raw.announcementDate || !p.section)) fail('Today announcement');
+  } else {
+    if (raw.announcementDate !== null || !Array.isArray(raw.announcementDates) || raw.announcementDates.length > 1000 ||
+        raw.announcementDates.some((value,i)=>!day(value) || (i>0 && value>=raw.announcementDates[i-1]))) fail('Recent date cohorts');
+    const dates = new Set(raw.announcementDates);
+    if ((raw.advertisedTotal>0 && !dates.size) || raw.papers.some(p=>!dates.has(p.announcementDate))) fail('Recent paper cohort');
+    if (!plain(raw.dateTotals) || !plain(raw.dateStarts) || Object.keys(raw.dateTotals).length !== dates.size) fail('Recent cohort totals');
+    let total = 0;
+    for (const [date,count] of Object.entries(raw.dateTotals)) {
+      if (!dates.has(date) || !integer(count,1)) fail('Recent cohort total');
+      total += count;
     }
-  }
-  return entry;
-}
-
-function selection(value, key) {
-  const r = obj(value, 'daily selection record');
-  function read(v) {
-    obj(v, 'selection revision');
-    const mode = choice(v.mode, MODES, 'selection mode');
-    const day = date(v.date);
-    check(key.startsWith(day + '|' + mode + '|'), 'daily selection key');
-    const seen = new Set();
-    const maximum = mode === 'original' ? 0 : mode === 'discovery' ? 32 : mode === 'personalized' ? 200 : MAX_RECORDS;
-    const result = {mode, date: day, seed: str(v.seed, 'selection seed', 1024),
-      entries: list(v.entries, 'selected papers', maximum).map(e => {
-        obj(e, 'selected paper');
-        const paperId = pid(e.paperId);
-        check(!seen.has(paperId), 'duplicate selected paper');
-        seen.add(paperId);
-        return {paperId, category: optional(e.category, category), reason: str(e.reason, 'selection reason', 64000), probability: probability(e.probability)};
-      }), missing: list(v.missing, 'unrepresented categories', 32).map(m => {
-        obj(m, 'unrepresented category');
-        check(Object.hasOwn(CATEGORIES, m.category), 'missing mathematics category');
-        return {category: m.category, reason: str(m.reason, 'missing category reason', 8000)};
-      })};
-    // Metadata is an optional generation-time snapshot. Old revisions retain
-    // their original shape; loading or importing them never invents new quotas.
-    if (v.samplingVersion !== undefined) result.samplingVersion = choice(v.samplingVersion, [2], 'sampling version');
-    if (['categoryDistribution', 'targetSize', 'shortfall'].some(field => v[field] !== undefined)) {
-      check(result.samplingVersion === 2 && ['random', 'balanced', 'discovery'].includes(mode), 'category quota metadata');
-      const categories = new Set();
-      const assigned = new Map();
-      for (const entry of result.entries) {
-        check(Object.hasOwn(CATEGORIES, entry.category), 'assigned mathematics category');
-        assigned.set(entry.category, (assigned.get(entry.category) || 0) + 1);
+    if (total !== raw.advertisedTotal) fail('Recent total');
+    const starts = Object.keys(raw.dateStarts);
+    if (starts.length) {
+      if (starts.length !== dates.size) fail('Recent cohort starts');
+      let start = 1;
+      for (const date of raw.announcementDates) {
+        if (raw.dateStarts[date] !== start) fail('Recent cohort position');
+        start += raw.dateTotals[date];
       }
-      result.categoryDistribution = list(v.categoryDistribution, 'category distribution', 32).map(raw => {
-        const row = obj(raw, 'category distribution row');
-        check(Object.hasOwn(CATEGORIES, row.category) && !categories.has(row.category), 'unique distribution category');
-        categories.add(row.category);
-        const eligibleCount = number(row.eligibleCount, 'eligible paper count', 0, MAX_RECORDS, true);
-        const squareRootQuota = number(row.squareRootQuota, 'square-root quota', 0, MAX_RECORDS, true);
-        check(squareRootQuota === Math.ceil(Math.sqrt(eligibleCount)), 'calculated square-root quota');
-        const quota = number(row.quota, 'applied category quota', 0, squareRootQuota, true);
-        check(quota === (mode === 'discovery' ? Number(eligibleCount > 0) : squareRootQuota), 'mode category quota');
-        const selectedCount = number(row.selectedCount, 'assigned category count', 0, quota, true);
-        check(selectedCount === (assigned.get(row.category) || 0), 'category count matches selected papers');
-        const reason = optional(row.reason, value => str(value, 'quota reason', 8000, true));
-        check(selectedCount === quota || reason !== null, 'unfulfilled quota explanation');
-        return {category:row.category, eligibleCount, squareRootQuota, quota, selectedCount, reason};
-      });
-      check(categories.size === Object.keys(CATEGORIES).length, 'complete category distribution');
-      result.targetSize = number(v.targetSize, 'calculated selection size', 0, MAX_RECORDS, true);
-      check(result.targetSize === result.categoryDistribution.reduce((sum, row) => sum + row.quota, 0), 'total category quota');
-      result.shortfall = number(v.shortfall, 'selection shortfall', 0, result.targetSize, true);
-      check(result.shortfall === result.targetSize - result.entries.length, 'quota shortfall total');
+      if (raw.cohortSignature !== JSON.stringify(raw.announcementDates.map(date=>[date,raw.dateStarts[date]]))) fail('Recent cohort signature');
+    } else if (raw.cohortSignature !== null) fail('Recent cohort signature');
+    if (!Array.isArray(raw.sourceEntries) || raw.sourceEntries.length !== raw.advertisedTotal ||
+        raw.entryCount !== raw.sourceEntries.length || raw.distinctTotal !== papers.size) fail('Recent source counts');
+    const firstSeen = new Set();
+    const cohortCounts = Object.fromEntries(raw.announcementDates.map(date=>[date,0]));
+    for (let i=0;i<raw.sourceEntries.length;i++) {
+      const entry=raw.sourceEntries[i], paper=papers.get(entry?.paperId);
+      if (!plain(entry) || entry.index !== i+1 || !paper || !dates.has(entry.announcementDate) ||
+          ![null,'new','cross','replacement'].includes(entry.section) || !Number.isSafeInteger(entry.version) || entry.version<0 ||
+          (i>0 && entry.announcementDate>raw.sourceEntries[i-1].announcementDate)) fail('Recent source row');
+      cohortCounts[entry.announcementDate]++;
+      if (!firstSeen.has(entry.paperId)) {
+        if (paper.announcementDate !== entry.announcementDate || paper.section !== entry.section ||
+            (paper.version && entry.version && paper.version!==entry.version)) fail('Recent first paper occurrence');
+        firstSeen.add(entry.paperId);
+      }
     }
-    return result;
+    if (firstSeen.size!==papers.size || raw.announcementDates.some(date=>cohortCounts[date]!==raw.dateTotals[date])) fail('Recent cohort row counts');
   }
-  const result = {original: read(r.original), current: read(r.current),
-    revisions: list(r.revisions, 'selection revisions').map(read), createdAt: timestamp(r.createdAt)};
-  if (r.paperSnapshots !== undefined) result.paperSnapshots = recordMap(r.paperSnapshots, 'daily paper snapshots', checkedPaper);
+  const result = mergeListingPages([{...raw,baseUrl}]);
+  if (!result.complete) fail('population reconciliation');
   return result;
 }
 
-function checkedRecord(kind, key, value) {
-  recordKey(key);
-  switch (kind) {
-    case 'papers': return checkedPaper(value, key);
-    case 'bookmarks': case 'reading': pid(key); return timestamp(value);
-    case 'events': return feedback(value, key);
-    case 'subscriptions': return subscription(value, key);
-    case 'knowledge': return knowledge(value);
-    case 'glossary': return glossary(value, key);
-    case 'explanations': return explanation(value, key);
-    case 'selections': return selection(value, key);
-    default: throw new Error('Unknown data collection.');
-  }
+// The contents of a template belong to an inert document, including its images,
+// frames and scripts. Only strings extracted by parseListing leave the template.
+function inertDocument(html) {
+  const template = document.createElement('template');
+  template.innerHTML = html;
+  return template.content;
 }
 
-function checkRevisionGraph(events, allowMissing = false) {
-  const byId = new Map(events.map(event => [event.eventId, event]));
-  check(byId.size === events.length, 'duplicate feedback identifier');
+function mergeListingPages(pages) {
+  if (!pages.length) throw new Error('A starting listing is required.');
+  const first = pages[0];
+  if (first.population === 'recent') return mergeRecentPages(pages);
+  const papers = new Map();
+  const totals = new Set();
+  const sectionTotals = {};
+  const integrity = new Set();
+  const next = new Set();
   const visited = new Set();
-  for (const event of events) {
-    const path = new Set();
-    let item = event;
-    while (item && !visited.has(item.eventId)) {
-      check(!path.has(item.eventId), 'feedback revision cycle');
-      path.add(item.eventId);
-      const parent = byId.get(item.revisionOf);
-      check(!item.revisionOf || (parent ? parent.paperId === item.paperId : allowMissing), 'feedback revision reference');
-      item = parent;
+  for (const page of pages) {
+    if (!first.announcementDate || page.announcementDate !== first.announcementDate) {
+      integrity.add('Pagination could not verify a single announcement date.');
+      if (page !== first) continue;
     }
-    for (const id of path) visited.add(id);
-  }
-}
-
-function emptyState() {
-  return {settings: mergedSettings(), events: [], papers: {}, bookmarks: {}, reading: {},
-    subscriptions: [], knowledge: {}, glossary: {}, selections: {}, explanations: {}};
-}
-
-function validateImport(data) {
-  if (!data || data.format !== 'arxiv-discovery' || data.schemaVersion !== SCHEMA_VERSION) throw new Error('This is not a supported arXiv Discovery backup.');
-  function inspect(value, depth) {
-    check(depth <= 30, 'backup nesting depth');
-    if (value && typeof value === 'object') {
-      if (!Array.isArray(value)) obj(value, 'backup object');
-      for (const key of Object.keys(value)) {
-        if (FORBIDDEN.has(key)) throw new Error('Unsafe key in backup.');
-        inspect(value[key], depth + 1);
+    if (!listingUrl(page.baseUrl, first.baseUrl)) {
+      integrity.add('A pagination URL did not belong to the same arXiv daily listing.');
+      continue;
+    }
+    visited.add(listingUrl(page.baseUrl, first.baseUrl));
+    for (const warning of page.integrityWarnings || []) integrity.add(warning);
+    if (Number.isSafeInteger(page.advertisedTotal)) totals.add(page.advertisedTotal);
+    for (const [section, count] of Object.entries(page.sectionTotals || {})) {
+      if (section in sectionTotals && sectionTotals[section] !== count) {
+        integrity.add('The advertised size of the ' + section + ' section changed between pages.');
+      }
+      sectionTotals[section] = count;
+    }
+    for (const paper of page.papers) {
+      const previous = papers.get(paper.id);
+      if (previous && (previous.section !== paper.section || previous.title !== paper.title ||
+          (previous.version && paper.version && previous.version !== paper.version))) {
+        integrity.add('Different records were returned for arXiv:' + paper.id + '.');
+      } else if (!previous || (!previous.version && paper.version)) {
+        papers.set(paper.id, paper);
       }
     }
-  }
-  inspect(data, 0);
-  check(new TextEncoder().encode(JSON.stringify(data)).byteLength <= 50000000, 'backup size (50 MB limit)');
-  const s = obj(data.state, 'backup state');
-  const result = emptyState();
-  result.settings = mergedSettings(s.settings === undefined ? {} : s.settings, true);
-  for (const kind of COLLECTIONS) {
-    if (s[kind] === undefined) continue;
-    if (kind === 'events' || kind === 'subscriptions') {
-      const seen = new Set();
-      result[kind] = list(s[kind], kind).map(value => {
-        const key = kind === 'events' ? value?.eventId : value?.id;
-        check(!seen.has(key), 'duplicate ' + kind + ' record');
-        seen.add(key);
-        return checkedRecord(kind, key, value);
-      });
-    } else {
-      result[kind] = recordMap(s[kind], kind, (v, k) => checkedRecord(kind, k, v));
+    for (const raw of page.nextUrls) {
+      const url = listingUrl(raw, first.baseUrl);
+      if (url) next.add(url);
     }
   }
-  checkRevisionGraph(result.events, true);
-  return result;
-}
-
-function publicListingKey(key) {
-  const match = typeof key === 'string' && /^listing:(.+):(\d{4}-\d{2}-\d{2})$/.exec(key);
-  check(match && listingUrl(match[1], match[1]), 'public listing key');
-  const canonical = new URL(listingUrl(match[1], match[1]));
-  return 'listing:' + canonical.origin + canonical.pathname + ':' + date(match[2]);
-}
-
-function checkedPublicListing(value, key) {
-  const v = obj(value, 'public listing');
-  const day = date(v.announcementDate);
-  const baseUrl = listingUrl(v.baseUrl, v.baseUrl);
-  check(baseUrl && publicListingKey('listing:' + baseUrl + ':' + day) === publicListingKey(key), 'public listing identity');
-  check(v.complete === true && list(v.warnings, 'listing warnings').length === 0, 'complete listing');
-  check(list(v.integrityWarnings ?? [], 'listing integrity warnings').length === 0 &&
-    list(v.nextUrls ?? [], 'remaining listing pages').length === 0, 'finished listing');
-  const seen = new Set();
-  const papers = list(v.papers, 'listing papers').map(raw => {
-    const p = checkedPaper(raw);
-    check(!seen.has(p.id) && p.section && p.announcementDate === day, 'unique, dated listing paper');
-    seen.add(p.id);
-    return p;
-  });
-  const counts = listingCounts(papers);
-  check(v.advertisedTotal === counts.total && Object.keys(counts).every(k => v.counts?.[k] === counts[k]), 'listing counts');
-  for (const [k, n] of Object.entries(obj(v.sectionTotals ?? {}, 'advertised section counts'))) {
-    check(SECTIONS.includes(k) && counts[k] === n, 'advertised section count');
+  const advertisedTotal = [...totals][0] ?? null;
+  if (totals.size > 1) integrity.add('The advertised daily total changed between pages.');
+  const records = [...papers.values()];
+  const counts = listingCounts(records);
+  const warnings = [...integrity];
+  if (advertisedTotal === null) warnings.push('The daily total could not be verified.');
+  else if (counts.total !== advertisedTotal) warnings.push('Retrieved ' + counts.total + ' of ' + advertisedTotal + ' announced entries.');
+  for (const [section, total] of Object.entries(sectionTotals)) {
+    if (counts[section] !== total) warnings.push('Retrieved ' + counts[section] + ' of ' + total + ' entries in the ' + section + ' section.');
   }
-  return {papers, counts, announcementDate: day, advertisedTotal: counts.total, baseUrl,
-    complete: true, sectionTotals: Object.fromEntries(SECTIONS.map(k => [k, counts[k]])), nextUrls: [], warnings: [], integrityWarnings: []};
+  const complete = warnings.length === 0;
+  return {
+    population: 'today', papers: records, counts, advertisedTotal, sectionTotals, complete, warnings,
+    announcementDates: first.announcementDate ? [first.announcementDate] : [],
+    announcementDate: first.announcementDate, baseUrl: first.baseUrl, integrityWarnings: [...integrity],
+    nextUrls: complete ? [] : [...next].filter(url => !visited.has(url)),
+  };
 }
 
-return {SCHEMA_VERSION,COLLECTIONS,DEFAULT_SETTINGS,recordKey,checkedPaper,mergedSettings,checkedRecord,checkRevisionGraph,emptyState,validateImport,publicListingKey,checkedPublicListing};
+// Reconcile raw row positions before deduplicating paper identities. Otherwise
+// two page overlaps could conceal a missing cohort or falsely reduce coverage.
+function mergeRecentPages(pages) {
+  const first = pages[0], integrity = new Set(), totals = new Set();
+  const positions = new Map(), records = new Map(), paperPositions = new Map();
+  const dateTotals = {}, dateStarts = {}, visited = new Set(), next = new Set();
+  const declared = new Set(first.announcementDates || []);
+  for (const page of pages) {
+    const url = listingUrl(page.baseUrl, first.baseUrl);
+    if (page.population !== 'recent' || !url) {
+      integrity.add('A pagination page did not belong to the same arXiv Recent listing.');
+      continue;
+    }
+    if (page.cohortSignature !== first.cohortSignature) {
+      integrity.add('The Recent announcement cohorts changed between pages.');
+      if (page !== first) continue;
+    }
+    visited.add(url);
+    for (const warning of page.integrityWarnings || []) integrity.add(warning);
+    if (Number.isSafeInteger(page.advertisedTotal)) totals.add(page.advertisedTotal);
+    for (const date of page.announcementDates || []) declared.add(date);
+    for (const [name, values, target] of [['total', page.dateTotals || {}, dateTotals], ['first row', page.dateStarts || {}, dateStarts]]) {
+      for (const [date, value] of Object.entries(values)) {
+        if (date in target && target[date] !== value) integrity.add('The advertised ' + name + ' for the ' + date + ' cohort changed between pages.');
+        target[date] = value;
+      }
+    }
+    const pagePapers = new Map(page.papers.map(paper => [paper.id, paper]));
+    for (const entry of page.sourceEntries || []) {
+      const old = positions.get(entry.index);
+      if (old && (old.paperId !== entry.paperId || old.announcementDate !== entry.announcementDate ||
+          old.section !== entry.section || (old.version && entry.version && old.version !== entry.version))) {
+        integrity.add('A Recent row changed identity, date, section or version between pages.');
+        continue;
+      }
+      positions.set(entry.index, old || entry);
+      const paper = pagePapers.get(entry.paperId), previous = records.get(entry.paperId);
+      if (!paper) { integrity.add('A Recent source row has no matching paper metadata.'); continue; }
+      if (previous && previous.version === paper.version && previous.title !== paper.title) {
+        integrity.add('Conflicting metadata for arXiv:' + paper.id + '.');
+      }
+      if (!previous || entry.index < paperPositions.get(entry.paperId)) {
+        records.set(entry.paperId, paper);
+        paperPositions.set(entry.paperId, entry.index);
+      } else if (entry.index === paperPositions.get(entry.paperId) && !previous.version && paper.version) {
+        records.set(entry.paperId, paper);
+      }
+    }
+    for (const raw of page.nextUrls || []) {
+      const link = listingUrl(raw, first.baseUrl);
+      if (link) next.add(link);
+    }
+  }
+  if (totals.size > 1) integrity.add('The advertised Recent total changed between pages.');
+  const advertisedTotal = [...totals][0] ?? null;
+  const sourceEntries = [...positions.values()].sort((a, b) => a.index - b.index);
+  const papers = [...records.values()].sort((a, b) => paperPositions.get(a.id) - paperPositions.get(b.id));
+  const dates = [...declared].sort().reverse();
+  for (let i = 1; i < sourceEntries.length; i++) {
+    if (sourceEntries[i].announcementDate > sourceEntries[i - 1].announcementDate) integrity.add('Recent entries changed chronological cohort order.');
+  }
+  const warnings = [...integrity];
+  if (advertisedTotal === null) warnings.push('The Recent total could not be verified.');
+  else if (sourceEntries.length !== advertisedTotal || sourceEntries.some((entry, i) => entry.index !== i + 1)) {
+    warnings.push('Retrieved ' + sourceEntries.length + ' of ' + advertisedTotal + ' Recent entries.');
+  }
+  for (const [date, total] of Object.entries(dateTotals)) {
+    const received = sourceEntries.filter(entry => entry.announcementDate === date).length;
+    if (received !== total) warnings.push('Retrieved ' + received + ' of ' + total + ' entries announced on ' + date + '.');
+  }
+  const complete = warnings.length === 0;
+  const nextUrls = [...next].filter(url => {
+    if (visited.has(url)) return false;
+    const parsed = new URL(url), skip = Number(parsed.searchParams.get('skip') || 0), show = Number(parsed.searchParams.get('show') || 50);
+    const end = advertisedTotal === null ? skip + show : Math.min(advertisedTotal, skip + show);
+    for (let index = skip + 1; index <= end; index++) if (!positions.has(index)) return true;
+    return false;
+  }).sort((a, b) => {
+    const left = new URL(a), right = new URL(b);
+    return Number(right.searchParams.get('show') || 50) - Number(left.searchParams.get('show') || 50) ||
+      Number(left.searchParams.get('skip') || 0) - Number(right.searchParams.get('skip') || 0);
+  });
+  return {
+    population: 'recent', papers, counts: listingCounts(papers), advertisedTotal,
+    announcementDate: null, announcementDates: dates, dateTotals, dateStarts,
+    cohortSignature: first.cohortSignature, entryCount: sourceEntries.length,
+    distinctTotal: complete ? papers.length : null, sourceEntries, sectionTotals: {}, complete, warnings,
+    baseUrl: first.baseUrl, integrityWarnings: [...integrity], nextUrls: complete ? [] : nextUrls,
+  };
+}
+
+async function loadCompleteListing(initial, {
+  request, parseDocument = inertDocument, baseUrl = initial.baseUrl, onProgress, maxPages = 80,
+} = {}) {
+  if (initial.complete) return initial;
+  const start = listingUrl(baseUrl, baseUrl);
+  const recent = initial.population === 'recent';
+  if ((!recent && !initial.announcementDate) || (recent && !initial.announcementDates?.length && initial.advertisedTotal !== 0) || !start) {
+    return { ...initial, complete: false, warnings: [...new Set([...initial.warnings, 'A dated arXiv daily listing is needed to retrieve additional pages.'])] };
+  }
+  const pages = [{ ...initial, baseUrl: start }];
+  const attempted = new Set([start]);
+  const errors = [];
+  const retry = new Set();
+  let combined = mergeListingPages(pages);
+  let received = 0;
+  while (!combined.complete && received < maxPages) {
+    const next = combined.nextUrls.find(url => !attempted.has(url));
+    if (!next) break;
+    attempted.add(next);
+    received++;
+    let status = 0;
+    try {
+      const response = await request(next, { method: 'GET', timeout: 30000 });
+      status = response?.status || 0;
+      if (status < 200 || status >= 300) throw new Error('arXiv returned HTTP ' + status + '.');
+      const finalUrl = listingUrl(response.finalUrl || next, start);
+      if (!finalUrl) throw new Error('A redirect left the requested arXiv daily listing.');
+      if (typeof response.text !== 'string' || response.text.length > 32 * 1024 * 1024) {
+        throw new Error('The response was missing or exceeded the 32 MiB page limit.');
+      }
+      const page = parseListing(parseDocument(response.text, finalUrl), finalUrl);
+      if (recent ? page.population !== 'recent' || page.cohortSignature !== initial.cohortSignature : !page.announcementDate || page.announcementDate !== initial.announcementDate) {
+        errors.push('The announcement date changed or disappeared during pagination. Open the latest listing to start a new cycle.');
+        break;
+      }
+      if (initial.advertisedTotal !== null && page.advertisedTotal !== null && page.advertisedTotal !== initial.advertisedTotal) {
+        errors.push('The advertised daily total changed during pagination. Reload the listing to verify the new total.');
+        break;
+      }
+      attempted.add(finalUrl);
+      if (recent && Object.entries(initial.dateTotals || {}).some(([date, total]) => date in (page.dateTotals || {}) && page.dateTotals[date] !== total)) {
+        errors.push('The Recent announcement cohort totals changed during pagination. Reload the listing.');
+        break;
+      }
+      // A verified complete rendering can replace a truncated or malformed first
+      // page. Never mix its metadata with a different publication cycle.
+      if (page.complete && (!recent || mergeListingPages([...pages, page]).complete)) {
+        onProgress?.({ pages: pages.length + 1, papers: page.counts.total, advertisedTotal: page.advertisedTotal });
+        return page;
+      }
+      pages.push(page);
+      combined = mergeListingPages(pages);
+      onProgress?.({ pages: pages.length, papers: combined.counts.total, advertisedTotal: combined.advertisedTotal });
+      if (recent && combined.integrityWarnings.length) break;
+    } catch (error) {
+      retry.add(next);
+      errors.push('Could not read a pagination page. ' + (error?.message || 'The request failed.'));
+      if (STATUS_BLOCKS_MORE_REQUESTS.has(status)) break;
+    }
+  }
+  if (combined.complete) return combined;
+  if (received >= maxPages && combined.nextUrls.some(url => !attempted.has(url))) {
+    errors.push('Stopped after ' + received + ' additional pages. A complete listing could not be verified.');
+  }
+  if (!combined.nextUrls.length && !errors.length) errors.push('No further same-list pagination links were available.');
+  return {
+    ...combined, warnings: [...new Set([...combined.warnings, ...errors])],
+    nextUrls: [...new Set([...combined.nextUrls.filter(url => !attempted.has(url)), ...retry])],
+  };
+}
+
+return {validatePopulationSnapshot,mergeListingPages,loadCompleteListing};
 },
 "src/parser.js": (__require) => {
 const { normalizeCategory } = __require("src/categories.js");
@@ -1547,11 +1793,11 @@ function arxivUrl(raw, base) {
   return url;
 }
 
-// Ignore a fetched document's <base>. Only follow the same arXiv daily listing.
+// Ignore a fetched document's <base>. Only follow the same authoritative listing.
 function listingUrl(raw, base = DEFAULT_LIST) {
   const url = arxivUrl(raw, base);
   const current = arxivUrl(base, DEFAULT_LIST);
-  if (!url || !current || !/^\/list\/[a-z][a-z.-]*\/new\/?$/i.test(url.pathname)) return null;
+  if (!url || !current || !/^\/list\/[a-z][a-z.-]*\/(?:new|recent)\/?$/i.test(url.pathname)) return null;
   if (url.pathname.replace(/\/$/, '') !== current.pathname.replace(/\/$/, '')) return null;
   for (const [key, value] of url.searchParams) {
     if (!['skip', 'show'].includes(key) || url.searchParams.getAll(key).length !== 1) return null;
@@ -1785,7 +2031,7 @@ function parseDateHeading(value) {
   const normalized = value.trim().replace(/\s+/g, ' ');
   const heading = normalized.replace(/^(?:(?:showing\s+)?(?:new\s+)?(?:listings?|submissions?|announcements?)\s+(?:for|on)\s+|(?:cross|replacement)\s+submissions?\s+for\s+)/i, '')
     .replace(/^(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?),?\s+/i, '')
-    .replace(/\s+\((?:showing|total)\b.*$/i, '');
+    .replace(/\s+\((?:continued|showing|total)\b.*$/i, '');
   let year, month, day;
   const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(heading);
   const dmy = /^(\d{1,2})\s+([a-z]+)\s+(\d{4})$/i.exec(heading);
@@ -1812,7 +2058,7 @@ function sectionHeading(text) {
 }
 
 function countClaim(text) {
-  const match = /\bshowing\s+(?:items\s+)?([\d,]+)(?:\s*[-–—]\s*([\d,]+))?\s+(?:of|out of)\s+([\d,]+)\s+(?:entr(?:y|ies)|items?|articles?)/i.exec(text);
+  const match = /\bshowing\s+(?:(?:items|first|last)\s+)?([\d,]+)(?:\s*[-–—]\s*([\d,]+))?\s+(?:of|out of)\s+([\d,]+)\s+(?:entr(?:y|ies)|items?|articles?)/i.exec(text);
   if (!match) return null;
   const first = Number(match[1].replace(/,/g, ''));
   const shown = match[2] ? Number(match[2].replace(/,/g, '')) - first + 1 : first;
@@ -1838,6 +2084,7 @@ function listingCounts(papers) {
 }
 
 function parseListing(doc, baseUrl = doc.URL || DEFAULT_LIST) {
+  if (/\/recent\/?$/.test(arxivUrl(baseUrl, DEFAULT_LIST)?.pathname || '')) return parseRecentListing(doc, baseUrl);
   const page = doc.querySelector('#dlpage') || doc;
   const sourceUrl = arxivUrl(baseUrl, DEFAULT_LIST);
   const base = sourceUrl ? sourceUrl.href : DEFAULT_LIST;
@@ -1933,9 +2180,162 @@ function parseListing(doc, baseUrl = doc.URL || DEFAULT_LIST) {
   }
   const complete = warnings.length === 0;
   return {
-    papers, counts, announcementDate: date, advertisedTotal, complete, warnings,
+    population: 'today', papers, counts, announcementDate: date, announcementDates: date ? [date] : [], advertisedTotal, complete, warnings,
     nextUrls: complete ? [] : navigation(page, base), baseUrl: base,
     sectionTotals, integrityWarnings: [...integrity],
+  };
+}
+
+// Recent is a source-defined collection of date cohorts, not a rolling clock
+// window. Its advertised total counts rows; normalized paper IDs may repeat.
+function parseRecentListing(doc, baseUrl = 'https://arxiv.org/list/math/recent') {
+  const page = doc.querySelector('#dlpage') || doc;
+  const base = listingUrl(baseUrl, baseUrl);
+  const integrity = new Set();
+  if (!base || !new URL(base).pathname.endsWith('/recent')) {
+    throw new Error('A valid arXiv Recent listing URL is required.');
+  }
+  const totals = new Set();
+  for (const box of page.querySelectorAll('.paging, .pagination')) {
+    const match = /\btotal\s+(?:of\s+)?([\d,]+)\s+(?:entr(?:y|ies)|articles?|items?)\b/i.exec(box.textContent);
+    if (match) totals.add(Number(match[1].replace(/,/g, '')));
+  }
+  if (totals.size > 1) integrity.add('The pagination controls report conflicting entry totals.');
+  const advertisedTotal = [...totals][0] ?? null;
+  if (advertisedTotal !== null && (!Number.isSafeInteger(advertisedTotal) || advertisedTotal > 100000)) {
+    integrity.add('The Recent entry total exceeds the supported collection limit.');
+  }
+
+  // Native date-navigation fragments identify the first row of every cohort.
+  // These links freeze the complete date set even when the page shows 50 rows.
+  const dateStarts = {};
+  const declaredDates = [];
+  for (const anchor of page.querySelectorAll('ul a[href], ol a[href]')) {
+    if (anchor.closest('dt,dd')) continue;
+    const date = parseDateHeading(anchor.textContent);
+    const raw = anchor.getAttribute('href');
+    if (!date || !listingUrl(raw, base)) continue;
+    const match = /^#item([1-9]\d*)$/.exec(new URL(raw, base).hash);
+    if (!match) continue;
+    const start = Number(match[1]);
+    if (!Number.isSafeInteger(start) || (advertisedTotal !== null && start > advertisedTotal)) {
+      integrity.add('A Recent date-navigation row is outside the advertised population.');
+      continue;
+    }
+    if (date in dateStarts && dateStarts[date] !== start) integrity.add('Conflicting first rows for the ' + date + ' cohort.');
+    if (!(date in dateStarts)) declaredDates.push(date);
+    dateStarts[date] = start;
+  }
+  const dateTotals = {};
+  if (declaredDates.length) {
+    if (dateStarts[declaredDates[0]] !== 1) integrity.add('Recent date navigation does not begin with the first entry.');
+    for (let i = 0; i < declaredDates.length; i++) {
+      const date = declaredDates[i], next = declaredDates[i + 1];
+      if (next && (next >= date || dateStarts[next] <= dateStarts[date])) {
+        integrity.add('Recent date navigation is not in chronological listing order.');
+      }
+      const end = next ? dateStarts[next] : advertisedTotal === null ? null : advertisedTotal + 1;
+      if (end !== null) dateTotals[date] = end - dateStarts[date];
+    }
+  }
+  const records = new Map();
+  const positions = new Map();
+  const claims = [];
+  const observedDates = [];
+  let currentDate = null, currentSection = null, currentClaim = null;
+  let offset = Number(new URL(base).searchParams.get('skip') || 0);
+  let rows = 0, malformed = 0, brokenPairs = 0, missingSubjects = 0, undated = 0;
+  for (const node of page.querySelectorAll('h2,h3,h4,dt,dd')) {
+    const list = node.closest(LISTS);
+    if (/^H[234]$/.test(node.tagName)) {
+      if (node.closest('dt,dd')) continue;
+      const label = node.textContent.trim();
+      const date = parseDateHeading(label);
+      if (date) {
+        currentDate = date;
+        currentSection = null;
+        if (!observedDates.includes(date)) observedDates.push(date);
+        if (declaredDates.length && !declaredDates.includes(date)) integrity.add('A displayed cohort is absent from Recent date navigation.');
+        const claim = countClaim(label);
+        currentClaim = {date, ...claim, rows: 0};
+        claims.push(currentClaim);
+        if (Number.isSafeInteger(claim?.total)) {
+          if (date in dateTotals && dateTotals[date] !== claim.total) integrity.add('Conflicting totals for the ' + date + ' announcement cohort.');
+          dateTotals[date] = claim.total;
+        }
+      } else {
+        const section = sectionHeading(label);
+        if (section) currentSection = section;
+      }
+      continue;
+    }
+    if (!list || node.parentElement !== list) continue;
+    if (node.localName === 'dd') {
+      if (node.previousElementSibling?.localName !== 'dt') brokenPairs++;
+      continue;
+    }
+    rows++;
+    if (currentClaim) currentClaim.rows++;
+    const dd = node.nextElementSibling;
+    if (dd?.localName !== 'dd') { brokenPairs++; continue; }
+    if (!currentDate) { undated++; continue; }
+    const route = rowIdentity(node, base);
+    if (!route) { malformed++; continue; }
+    // Recent frequently has no explicit new/cross/replacement label. Keep null;
+    // neither the primary category nor a version number proves submission type.
+    const marker = node.querySelector('.list-identifier, .list-submission-type, [data-submission-type]');
+    const rawSection = marker?.getAttribute('data-submission-type') || marker?.textContent || '';
+    const section = sectionHeading(rawSection.trim()) || currentSection;
+    const paper = parseRow(node, dd, route, section, currentDate, base);
+    if (!paper.title) { malformed++; continue; }
+    if (!paper.categories.length) missingSubjects++;
+    const named = node.querySelector('a[name^="item"], a[id^="item"]');
+    const match = /^item([1-9]\d*)$/.exec(named?.getAttribute('name') || named?.id || '');
+    const index = match ? Number(match[1]) : offset + rows;
+    if (index !== offset + rows || !Number.isSafeInteger(index) || (advertisedTotal !== null && index > advertisedTotal)) {
+      integrity.add('A Recent row position disagrees with its pagination offset.');
+    }
+    if (positions.has(index)) integrity.add('A Recent row position is repeated within this page.');
+    positions.set(index, {index, paperId: paper.id, announcementDate: currentDate, section: paper.section, version: paper.version});
+    if (dateStarts[currentDate] && (index < dateStarts[currentDate] || index >= dateStarts[currentDate] + dateTotals[currentDate])) {
+      integrity.add('A Recent row falls outside its advertised announcement cohort.');
+    }
+    const previous = records.get(paper.id);
+    if (!previous) records.set(paper.id, paper);
+    else if (previous.version === paper.version && previous.title !== paper.title) integrity.add('Conflicting metadata for arXiv:' + paper.id + '.');
+  }
+  if (!observedDates.length && advertisedTotal !== 0) integrity.add('The Recent listing does not identify valid announcement cohorts.');
+  for (let i = 1; i < observedDates.length; i++) if (observedDates[i] >= observedDates[i - 1]) {
+    integrity.add('The displayed Recent cohorts are not in chronological listing order.');
+  }
+  if (!page.querySelector(LISTS) && !page.querySelector('.paging,.pagination')) integrity.add('No arXiv article list or pagination summary was found.');
+  if (brokenPairs) integrity.add('Unpaired paper headers or descriptions: ' + brokenPairs + '.');
+  if (undated) integrity.add('Recent entries without an announcement date: ' + undated + '.');
+  if (malformed) integrity.add('Entries without a valid arXiv identifier and title: ' + malformed + '.');
+  if (missingSubjects) integrity.add('Entries without readable subject classifications: ' + missingSubjects + '.');
+  for (const claim of claims) if (Number.isFinite(claim.shown) && (claim.shown !== claim.rows || claim.shown > claim.total)) {
+    integrity.add('The displayed row count disagrees with the ' + claim.date + ' cohort heading.');
+  }
+  const papers = [...records.values()];
+  const sourceEntries = [...positions.values()].sort((a, b) => a.index - b.index);
+  const announcementDates = declaredDates.length ? declaredDates : observedDates;
+  const warnings = [...integrity];
+  if (advertisedTotal === null) warnings.push('The Recent total could not be verified.');
+  else if (sourceEntries.length !== advertisedTotal || sourceEntries.some((entry, i) => entry.index !== i + 1)) {
+    warnings.push('This page contains ' + sourceEntries.length + ' of ' + advertisedTotal + ' Recent entries.');
+  }
+  if (sourceEntries.length === advertisedTotal) {
+    for (const [date, total] of Object.entries(dateTotals)) if (sourceEntries.filter(entry => entry.announcementDate === date).length !== total) {
+      warnings.push('The complete row count disagrees with the ' + date + ' cohort total.');
+    }
+  }
+  const complete = warnings.length === 0;
+  return {
+    population: 'recent', papers, counts: listingCounts(papers), announcementDate: null, announcementDates,
+    advertisedTotal, entryCount: sourceEntries.length, distinctTotal: complete ? papers.length : null,
+    sourceEntries, dateTotals, dateStarts, cohortSignature: declaredDates.length ? JSON.stringify(declaredDates.map(date => [date, dateStarts[date]])) : null,
+    sectionTotals: {}, complete, warnings, integrityWarnings: [...integrity], baseUrl: base,
+    nextUrls: complete ? [] : navigation(page, base),
   };
 }
 
@@ -2013,7 +2413,572 @@ function readerTarget(node) {
   );
 }
 
-return {listingUrl,listingCounts,parseListing,findPaperNodes,parseAbstract,readerTarget};
+return {listingUrl,listingCounts,parseListing,parseRecentListing,findPaperNodes,parseAbstract,readerTarget};
+},
+"src/schema.js": (__require) => {
+// Only the fields defined here cross a backup or storage trust boundary.
+const {normalizeCategory, CATEGORIES} = __require("src/categories.js");
+const {listingCounts, listingUrl} = __require("src/parser.js");
+const {DEFAULT_FEED_SETTINGS, checkedFeedSettings} = __require("src/feed-settings.js");
+
+const SCHEMA_VERSION = 1;
+const COLLECTIONS = ['events', 'papers', 'savedPapers', 'bookmarks', 'reading', 'subscriptions', 'knowledge', 'glossary', 'selections', 'explanations', 'highlights'];
+const DEFAULT_SETTINGS = {
+  mode: 'random', includeCross: false, includeReplacements: false, exploration: 0.25,
+  personalizedCount: 50, trainRandom: true, useSubscriptions: false,
+  history: {mode: 'all', days: 30, start: '', end: ''}, resetAt: null, noSpoilers: true,
+  paperSpoilers: {}, theme: 'auto', showTools: true,
+  feeds: DEFAULT_FEED_SETTINGS,
+  ai: {enabled: false, url: 'http://127.0.0.1:4317', provider: 'local', token: '', model: '', consent: false,
+    dailyRequests: 10, maxInputChars: 100000, maxOutputTokens: 1600, dailyBudget: 1, inputPerMillion: 0, outputPerMillion: 0, profile: 'quick', timeoutSeconds: 420}
+};
+
+const MODES = ['random', 'balanced', 'personalized', 'discovery', 'subscriptions', 'original'];
+const LEVELS = ['Unfamiliar', 'Introduced', 'Developing', 'Comfortable', 'Proficient', 'Advanced'];
+const SECTIONS = ['new', 'cross', 'replacement'];
+const PAPER_FIELDS = ['title', 'abstract', 'comments', 'journalRef'];
+const MAX_RECORDS = 100000;
+const FORBIDDEN = new Set(['__proto__', 'constructor', 'prototype']);
+const ID = /^(?:\d{2}(?:0[1-9]|1[0-2])\.\d{4,5}|[a-z][a-z-]*\/\d{2}(?:0[1-9]|1[0-2])\d{3})$/;
+const RECORD_ID = /^[a-zA-Z0-9_-]{1,128}$/;
+
+function check(ok, label) {
+  if (!ok) throw new Error('Invalid ' + label + '.');
+}
+
+function obj(value, label) {
+  check(value !== null && typeof value === 'object' && !Array.isArray(value) &&
+    [Object.prototype, null].includes(Object.getPrototypeOf(value)), label);
+  return value;
+}
+
+function list(value, label, maximum = MAX_RECORDS) {
+  check(Array.isArray(value) && value.length <= maximum, label);
+  return value;
+}
+
+function str(value, label, max, required = false) {
+  check(typeof value === 'string' && value.length <= max && (!required || value.trim().length > 0), label);
+  return value;
+}
+
+function number(value, label, min, max, integer = false) {
+  check(Number.isFinite(value) && value >= min && value <= max && (!integer || Number.isSafeInteger(value)), label);
+  return value;
+}
+
+function choice(value, options, label) {
+  check(options.includes(value), label);
+  return value;
+}
+
+function bool(value, label) { return choice(value, [true, false], label); }
+
+function optional(value, validate) { return value == null ? null : validate(value); }
+
+function recordKey(value) {
+  str(value, 'record key', 1024, true);
+  if (FORBIDDEN.has(value)) throw new Error('Unsafe key in data.');
+  check(!/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value), 'record key');
+  return value;
+}
+
+function pid(value) {
+  check(typeof value === 'string' && value.length <= 80 && ID.test(value), 'arXiv paper identifier');
+  return value;
+}
+
+function uid(value) {
+  check(typeof value === 'string' && RECORD_ID.test(value), 'record identifier');
+  return recordKey(value);
+}
+
+function date(value) {
+  check(typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value), 'calendar date');
+  const at = Date.parse(value);
+  check(Number.isFinite(at) && new Date(at).toISOString().slice(0, 10) === value, 'calendar date');
+  return value;
+}
+
+function timestamp(value) {
+  check(typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value), 'timestamp');
+  date(value.slice(0, 10));
+  check(Number.isFinite(Date.parse(value)), 'timestamp');
+  return value;
+}
+
+function probability(value) { return optional(value, x => number(x, 'selection probability', 0, 1)); }
+
+function category(value) {
+  const code = normalizeCategory(value);
+  check(Boolean(code), 'arXiv category');
+  return code;
+}
+
+function url(value, label) {
+  str(value, label, 10000, true);
+  check(!/[\u0000-\u001f\\]/.test(value), label);
+  let parsed;
+  try { parsed = new URL(value); } catch { throw new Error('Invalid ' + label + '.'); }
+  check(['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password, label);
+  return parsed;
+}
+
+function paperLink(value, kind, id, version, allowFragment = false) {
+  const link = url(value, 'paper source link');
+  const expected = '/' + kind + '/' + id;
+  const versioned = version ? expected + 'v' + version : expected;
+  check(link.origin === 'https://arxiv.org' && !link.search &&
+    (link.pathname === expected || link.pathname === versioned) &&
+    (!link.hash || (allowFragment && /^#(?:[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,120}|page=[1-9]\d{0,4})$/.test(link.hash))), 'paper source link');
+  return link.href;
+}
+
+function author(value) {
+  const a = obj(value, 'author');
+  let href = null;
+  if (a.url != null && a.url !== '') {
+    const link = url(a.url, 'author link');
+    const profile = link.origin === 'https://arxiv.org' && /^\/(?:search(?:\/|$)|a\/[a-z0-9_-]+_\d+(?:\.html)?\/?$)/i.test(link.pathname);
+    const orcid = link.origin === 'https://orcid.org' && /^\/\d{4}-\d{4}-\d{4}-\d{3}[\dX]\/?$/i.test(link.pathname) && !link.search;
+    check(profile || orcid, 'author identity link');
+    href = link.href;
+  }
+  const stableId = optional(a.stableId, id => {
+    check(typeof id === 'string' && id.length <= 512 && /^(?:arxiv:[a-z0-9_-]+_\d+|orcid:\d{4}-\d{4}-\d{4}-\d{3}[\dX])$/i.test(id), 'author identity');
+    return id;
+  });
+  return {name: str(a.name, 'author name', 4000, true), url: href, stableId};
+}
+
+function recordMap(value, label, read) {
+  const entries = Object.entries(obj(value, label));
+  check(entries.length <= MAX_RECORDS, label);
+  // Object.fromEntries defines own properties and never invokes inherited setters.
+  return Object.fromEntries(entries.map(([key, data]) => [recordKey(key), read(data, key)]));
+}
+
+function checkedPaper(value, key = value?.id) {
+  const p = obj(value, 'paper');
+  const id = pid(p.id);
+  check(key === id, 'paper key');
+  const version = number(p.version ?? 0, 'paper version', 0, 9999999, true);
+  const versionedId = version ? id + 'v' + version : id;
+  check(p.versionedId === undefined || p.versionedId === versionedId, 'versioned paper identifier');
+  const links = obj(p.links ?? {}, 'paper links');
+  const result = {
+    id, version, versionedId, title: str(p.title, 'paper title', 16000),
+    authors: list(p.authors, 'paper authors').map(author),
+    categories: list(p.categories, 'paper categories', 512).map(category),
+    primaryCategory: optional(p.primaryCategory, category), abstract: str(p.abstract ?? '', 'abstract', 160000),
+    comments: str(p.comments ?? '', 'paper comments', 160000), journalRef: str(p.journalRef ?? '', 'journal reference', 160000),
+    announcementDate: optional(p.announcementDate, date), section: optional(p.section, s => choice(s, SECTIONS, 'submission section')),
+    links: {
+      abstract: paperLink(links.abstract ?? 'https://arxiv.org/abs/' + versionedId, 'abs', id, version),
+      pdf: paperLink(links.pdf ?? 'https://arxiv.org/pdf/' + versionedId, 'pdf', id, version),
+      html: optional(links.html, href => paperLink(href, 'html', id, version))
+    }
+  };
+  if (p.inlineLinks !== undefined) {
+    const fields = obj(p.inlineLinks, 'inline paper links');
+    result.inlineLinks = {};
+    for (const field of PAPER_FIELDS) {
+      if (fields[field] === undefined) continue;
+      let previous = 0;
+      result.inlineLinks[field] = list(fields[field], 'inline links', 10000).map(item => {
+        obj(item, 'inline link');
+        const start = number(item.start, 'inline link start', previous, result[field].length, true);
+        const end = number(item.end, 'inline link end', start + 1, result[field].length, true);
+        previous = end;
+        return {start, end, url: url(item.url, 'inline link URL').href};
+      });
+    }
+  }
+  return result;
+}
+
+function mergePaperMetadata(previous, current) {
+  const next = {...current};
+  if (!previous || previous.id !== current.id || previous.title !== current.title || previous.version !== current.version || !current.version) return next;
+  for (const field of ['abstract','comments','journalRef']) if (!next[field] && previous[field]) next[field] = previous[field];
+  const links = {};
+  for (const field of PAPER_FIELDS) {
+    const ranges = current.inlineLinks?.[field] || (next[field] === previous[field] ? previous.inlineLinks?.[field] : null);
+    if (ranges) links[field] = ranges.map(range => ({...range}));
+  }
+  if (Object.keys(links).length) next.inlineLinks = links;
+  return next;
+}
+
+function mergedSettings(raw = {}, portable = false) {
+  const s = {...DEFAULT_SETTINGS, ...obj(raw, 'settings')};
+  const h = {...DEFAULT_SETTINGS.history, ...obj(s.history, 'history settings')};
+  const a = {...DEFAULT_SETTINGS.ai, ...obj(s.ai, 'AI settings')};
+  const result = {
+    mode: choice(s.mode, MODES, 'recommendation mode'), exploration: number(s.exploration, 'exploration', 0, 1),
+    personalizedCount: number(s.personalizedCount, 'daily count', 1, 200, true),
+    theme: choice(s.theme, ['auto', 'light', 'dark'], 'theme'),
+    history: {mode: choice(h.mode, ['all', 'none', 'lastDays', 'ignoreLastDays', 'before', 'after', 'excludeRange'], 'history mode'),
+      days: number(h.days, 'training window days', 1, 36500, true), start: h.start === '' ? '' : date(h.start), end: h.end === '' ? '' : date(h.end)},
+    resetAt: optional(s.resetAt, timestamp), feeds: checkedFeedSettings(s.feeds),
+    paperSpoilers: recordMap(s.paperSpoilers, 'paper protections', (v, key) => { pid(key); return bool(v, 'paper protection'); })
+  };
+  for (const field of ['includeCross', 'includeReplacements', 'trainRandom', 'useSubscriptions', 'noSpoilers', 'showTools']) result[field] = bool(s[field], field);
+  if (s.previousMode !== undefined) result.previousMode = choice(s.previousMode, MODES.filter(mode => mode !== 'original'), 'previous recommendation mode');
+  check(h.mode !== 'excludeRange' || (h.start && h.end && h.start <= h.end), 'history date range');
+  check(!['before', 'after'].includes(h.mode) || h.start || h.end, 'history cutoff date');
+  check(typeof a.url === 'string' && /^http:\/\/127\.0\.0\.1(?::[1-9]\d{0,4})?\/?$/.test(a.url), 'loopback bridge origin');
+  const bridge = url(a.url, 'loopback bridge origin');
+  const model = str(a.model, 'AI model', 128);
+  check(!model || /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.test(model), 'AI model');
+  const token = portable ? '' : str(a.token, 'bridge pairing token', 256);
+  check(!token || /^[a-zA-Z0-9_-]{32,256}$/.test(token), 'bridge pairing token');
+  result.ai = {url: bridge.origin, provider: choice(a.provider, ['local', 'openai', 'gemini'], 'AI provider'), model, token,
+    enabled: portable ? false : bool(a.enabled, 'AI enabled flag'), consent: portable ? false : bool(a.consent, 'AI consent'),
+    profile: choice(a.profile, ['quick', 'full'], 'AI reading profile'),
+    timeoutSeconds: number(a.timeoutSeconds, 'AI request timeout', 60, 600, true),
+    dailyRequests: number(a.dailyRequests, 'daily request limit', 0, 10000, true),
+    maxInputChars: number(a.maxInputChars, 'source character limit', 256, 120000, true),
+    maxOutputTokens: number(a.maxOutputTokens, 'output token limit', 64, 8192, true),
+    dailyBudget: number(a.dailyBudget, 'daily budget', 0, 10000),
+    inputPerMillion: number(a.inputPerMillion, 'input price', 0, 10000), outputPerMillion: number(a.outputPerMillion, 'output price', 0, 10000)};
+  return result;
+}
+
+function feedback(value, key) {
+  const e = obj(value, 'feedback event');
+  check(uid(e.eventId) === key, 'feedback event key');
+  const paper = checkedPaper(e.paper, pid(e.paperId));
+  check((e.version ?? paper.version) === paper.version, 'feedback paper version');
+  const event = {eventId: key, paperId: paper.id, version: paper.version, timestamp: timestamp(e.timestamp),
+    value: choice(e.value, ['like', 'dislike', 'background', 'neutral', 'removed'], 'feedback value'),
+    reason: str(e.reason ?? '', 'feedback reason', 8000), mode: choice(e.mode, [...MODES,'trending','rising','for-you','highlights','recent','saved'], 'feedback mode'),
+    selectionProbability: probability(e.selectionProbability), revisionOf: optional(e.revisionOf, uid),
+    excluded: bool(e.excluded ?? false, 'feedback exclusion'), paper};
+  if (e.features !== undefined) {
+    const f = obj(e.features, 'feedback features');
+    check(f.schema === 'math-content-v1', 'feature schema');
+    event.features = {schema: f.schema, entries: list(f.entries, 'feature entries', 4000).map(entry => {
+      check(Array.isArray(entry) && entry.length === 2, 'feature entry');
+      return [str(entry[0], 'feature name', 256, true), number(entry[1], 'feature weight', 0, 8)];
+    })};
+  }
+  return event;
+}
+
+function subscription(value, key) {
+  const s = obj(value, 'author subscription');
+  check(uid(s.id) === key, 'subscription key');
+  return {id: key, ...author(s), createdAt: timestamp(s.createdAt), notes: str(s.notes ?? '', 'author notes', 100000),
+    confirmedNameOnly: bool(s.confirmedNameOnly ?? false, 'name-only confirmation')};
+}
+
+function knowledge(value) {
+  function level(item) {
+    obj(item, 'knowledge level');
+    return {level: choice(item.level, LEVELS, 'knowledge level'), updatedAt: timestamp(item.updatedAt)};
+  }
+  const entry = level(value);
+  if (value.history !== undefined) entry.history = list(value.history, 'knowledge history').map(level);
+  return entry;
+}
+
+function source(value, id, version) {
+  const s = obj(value, 'explanation source');
+  const kind = choice(s.kind, ['html', 'pdf', 'abstract'], 'source kind');
+  const route = kind === 'abstract' ? 'abs' : kind;
+  const href = paperLink(s.url, route, id, version);
+  const result = {kind, url: href, note: str(s.note ?? '', 'source note', 3200)};
+  if (s.citations !== undefined) {
+    result.citations = list(s.citations, 'source citations', 128).map(c => {
+      obj(c, 'citation');
+      const link = paperLink(c.url, route, id, version, true);
+      check(link.split('#')[0] === href, 'citation source');
+      return {label: str(c.label, 'citation label', 260), url: link,
+        quotes: list(c.quotes ?? [], 'citation quotes', 8).map(q => str(q, 'evidence quote', 320))};
+    });
+  }
+  return result;
+}
+
+function highlightDecision(value, paperId, version, evidenceSource) {
+  const h = obj(value,'highlight decision');
+  const status = choice(h.status,['candidate','not_established'],'highlight decision status');
+  const basis = [...new Set(list(h.basis,'highlight basis',6).map(b => choice(b,['open_problem','bound','method','connection','generalization','computation'],'highlight basis')))];
+  const citations = source({...evidenceSource,citations:h.citations},paperId,version).citations || [];
+  check(status !== 'candidate' || basis.length > 0 && citations.some(c => c.quotes.length > 0),'source-backed highlight candidate');
+  check(citations.every(c => (evidenceSource.citations || []).some(s => s.label === c.label && s.url === c.url && c.quotes.every(q => s.quotes?.includes(q)))),'highlight evidence provenance');
+  check(status !== 'not_established' || basis.length === 0 && citations.length === 0,'inconclusive highlight decision');
+  return {status,basis,reason:str(h.reason,'highlight decision reason',2000,true),citations};
+}
+
+function glossary(value, key) {
+  const g = obj(value, 'glossary entry');
+  const paperId = pid(g.paperId);
+  const versioned = key.split(':', 1)[0];
+  const version = versioned === paperId ? 0 : Number(versioned.slice(paperId.length + 1));
+  check(versioned === paperId || (Number.isSafeInteger(version) && version > 0 && versioned === paperId + 'v' + version), 'glossary paper key');
+  const term = str(g.term, 'glossary term', 500, true);
+  check(key.length > versioned.length + 1, 'glossary term key');
+  const entry = {term, paperId, answer: str(g.answer, 'glossary answer', 64000),
+    status: choice(g.status ?? 'unfamiliar', ['unfamiliar', 'partial', 'understood'], 'glossary status'),
+    updatedAt: timestamp(g.updatedAt), visits: number(g.visits ?? 1, 'glossary visits', 0, Number.MAX_SAFE_INTEGER, true)};
+  if (g.visitHistory !== undefined) entry.visitHistory = list(g.visitHistory, 'glossary visits').map(timestamp);
+  if (g.source !== undefined) entry.source = source(g.source, paperId, version);
+  return entry;
+}
+
+function explanation(value, key) {
+  const v = obj(value, 'cached explanation');
+  const paperId = pid(v.paperId);
+  const version = number(v.version, 'source version', 0, 9999, true);
+  const prefix = 'ai:' + paperId + ':v' + version + ':';
+  check(key.startsWith(prefix) && /^[a-f0-9]{64}$/.test(key.slice(prefix.length)), 'explanation cache key');
+  const entry = {paperId, version, text: str(v.text, 'cached explanation', 64000, true), source: source(v.source, paperId, version),
+    savedAt: number(v.savedAt, 'cache timestamp', 0, 8640000000000000, true)};
+  if (v.highlight !== undefined) entry.highlight = highlightDecision(v.highlight,paperId,version,entry.source);
+  if (v.usage !== undefined) {
+    const usage = obj(v.usage, 'AI usage');
+    entry.usage = {};
+    for (const k of ['inputTokens', 'outputTokens', 'estimatedCostUsd', 'dailyRequests', 'dailyCostUsd']) {
+      if (usage[k] !== undefined) entry.usage[k] = number(usage[k], 'usage quantity', 0, Number.MAX_SAFE_INTEGER);
+    }
+  }
+  return entry;
+}
+
+function selection(value, key) {
+  const r = obj(value, 'daily selection record');
+  function read(v) {
+    obj(v, 'selection revision');
+    const mode = choice(v.mode, MODES, 'selection mode');
+    const day = date(v.date);
+    check(key.startsWith(day + '|' + mode + '|'), 'daily selection key');
+    const seen = new Set();
+    const maximum = mode === 'original' ? 0 : mode === 'discovery' ? 32 : mode === 'personalized' ? 200 : MAX_RECORDS;
+    const result = {mode, date: day, seed: str(v.seed, 'selection seed', 1024),
+      entries: list(v.entries, 'selected papers', maximum).map(e => {
+        obj(e, 'selected paper');
+        const paperId = pid(e.paperId);
+        check(!seen.has(paperId), 'duplicate selected paper');
+        seen.add(paperId);
+        return {paperId, category: optional(e.category, category), reason: str(e.reason, 'selection reason', 64000), probability: probability(e.probability)};
+      }), missing: list(v.missing, 'unrepresented categories', 32).map(m => {
+        obj(m, 'unrepresented category');
+        check(Object.hasOwn(CATEGORIES, m.category), 'missing mathematics category');
+        return {category: m.category, reason: str(m.reason, 'missing category reason', 8000)};
+      })};
+    // Metadata is an optional generation-time snapshot. Old revisions retain
+    // their original shape; loading or importing them never invents new quotas.
+    if (v.samplingVersion !== undefined) result.samplingVersion = choice(v.samplingVersion, [2], 'sampling version');
+    if (['categoryDistribution', 'targetSize', 'shortfall'].some(field => v[field] !== undefined)) {
+      check(result.samplingVersion === 2 && ['random', 'balanced', 'discovery'].includes(mode), 'category quota metadata');
+      const categories = new Set();
+      const assigned = new Map();
+      for (const entry of result.entries) {
+        check(Object.hasOwn(CATEGORIES, entry.category), 'assigned mathematics category');
+        assigned.set(entry.category, (assigned.get(entry.category) || 0) + 1);
+      }
+      result.categoryDistribution = list(v.categoryDistribution, 'category distribution', 32).map(raw => {
+        const row = obj(raw, 'category distribution row');
+        check(Object.hasOwn(CATEGORIES, row.category) && !categories.has(row.category), 'unique distribution category');
+        categories.add(row.category);
+        const eligibleCount = number(row.eligibleCount, 'eligible paper count', 0, MAX_RECORDS, true);
+        const squareRootQuota = number(row.squareRootQuota, 'square-root quota', 0, MAX_RECORDS, true);
+        check(squareRootQuota === Math.ceil(Math.sqrt(eligibleCount)), 'calculated square-root quota');
+        const quota = number(row.quota, 'applied category quota', 0, squareRootQuota, true);
+        check(quota === (mode === 'discovery' ? Number(eligibleCount > 0) : squareRootQuota), 'mode category quota');
+        const selectedCount = number(row.selectedCount, 'assigned category count', 0, quota, true);
+        check(selectedCount === (assigned.get(row.category) || 0), 'category count matches selected papers');
+        const reason = optional(row.reason, value => str(value, 'quota reason', 8000, true));
+        check(selectedCount === quota || reason !== null, 'unfulfilled quota explanation');
+        return {category:row.category, eligibleCount, squareRootQuota, quota, selectedCount, reason};
+      });
+      check(categories.size === Object.keys(CATEGORIES).length, 'complete category distribution');
+      result.targetSize = number(v.targetSize, 'calculated selection size', 0, MAX_RECORDS, true);
+      check(result.targetSize === result.categoryDistribution.reduce((sum, row) => sum + row.quota, 0), 'total category quota');
+      result.shortfall = number(v.shortfall, 'selection shortfall', 0, result.targetSize, true);
+      check(result.shortfall === result.targetSize - result.entries.length, 'quota shortfall total');
+    }
+    return result;
+  }
+  const result = {original: read(r.original), current: read(r.current),
+    revisions: list(r.revisions, 'selection revisions').map(read), createdAt: timestamp(r.createdAt)};
+  if (r.paperSnapshots !== undefined) result.paperSnapshots = recordMap(r.paperSnapshots, 'daily paper snapshots', checkedPaper);
+  return result;
+}
+
+function checkedRecord(kind, key, value) {
+  recordKey(key);
+  switch (kind) {
+    case 'papers': case 'savedPapers': return checkedPaper(value, key);
+    case 'bookmarks': case 'reading': pid(key); return timestamp(value);
+    case 'events': return feedback(value, key);
+    case 'subscriptions': return subscription(value, key);
+    case 'knowledge': return knowledge(value);
+    case 'glossary': return glossary(value, key);
+    case 'explanations': return explanation(value, key);
+    case 'selections': return selection(value, key);
+    case 'highlights': {
+      const v = obj(value, 'AI highlight assessment');
+      const paperId = pid(v.paperId), version = number(v.version, 'highlight paper version', 0, 9999, true);
+      check(key === paperId, 'highlight key');
+      const provenance = source(v.source,paperId,version);
+      const decision = highlightDecision(v.highlight,paperId,version,provenance);
+      check(!v.noSpoilers || decision.status === 'not_established','protected highlight decision');
+      return {paperId, version, text: str(v.text, 'highlight assessment', 64000, true),
+        source: provenance, highlight:decision, assessedAt: timestamp(v.assessedAt),
+        noSpoilers: bool(v.noSpoilers, 'highlight spoiler protection'), announcementDate: optional(v.announcementDate,date),
+        assessmentKind: choice(v.assessmentKind, ['unverified_ai_assessment'], 'highlight assessment kind')};
+    }
+    default: throw new Error('Unknown data collection.');
+  }
+}
+
+function checkRevisionGraph(events, allowMissing = false) {
+  const byId = new Map(events.map(event => [event.eventId, event]));
+  check(byId.size === events.length, 'duplicate feedback identifier');
+  const visited = new Set();
+  for (const event of events) {
+    const path = new Set();
+    let item = event;
+    while (item && !visited.has(item.eventId)) {
+      check(!path.has(item.eventId), 'feedback revision cycle');
+      path.add(item.eventId);
+      const parent = byId.get(item.revisionOf);
+      check(!item.revisionOf || (parent ? parent.paperId === item.paperId : allowMissing), 'feedback revision reference');
+      item = parent;
+    }
+    for (const id of path) visited.add(id);
+  }
+}
+
+function emptyState() {
+  return {settings: mergedSettings(), events: [], papers: {}, savedPapers: {}, bookmarks: {}, reading: {},
+    subscriptions: [], knowledge: {}, glossary: {}, selections: {}, explanations: {}, highlights: {}};
+}
+
+function validateImport(data) {
+  if (!data || data.format !== 'arxiv-discovery' || data.schemaVersion !== SCHEMA_VERSION) throw new Error('This is not a supported arXiv Discovery backup.');
+  function inspect(value, depth) {
+    check(depth <= 30, 'backup nesting depth');
+    if (value && typeof value === 'object') {
+      if (!Array.isArray(value)) obj(value, 'backup object');
+      for (const key of Object.keys(value)) {
+        if (FORBIDDEN.has(key)) throw new Error('Unsafe key in backup.');
+        inspect(value[key], depth + 1);
+      }
+    }
+  }
+  inspect(data, 0);
+  check(new TextEncoder().encode(JSON.stringify(data)).byteLength <= 50000000, 'backup size (50 MB limit)');
+  const s = obj(data.state, 'backup state');
+  const result = emptyState();
+  result.settings = mergedSettings(s.settings === undefined ? {} : s.settings, true);
+  for (const kind of COLLECTIONS) {
+    if (s[kind] === undefined) continue;
+    if (kind === 'events' || kind === 'subscriptions') {
+      const seen = new Set();
+      result[kind] = list(s[kind], kind).map(value => {
+        const key = kind === 'events' ? value?.eventId : value?.id;
+        check(!seen.has(key), 'duplicate ' + kind + ' record');
+        seen.add(key);
+        return checkedRecord(kind, key, value);
+      });
+    } else {
+      result[kind] = recordMap(s[kind], kind, (v, k) => checkedRecord(kind, k, v));
+    }
+  }
+  checkRevisionGraph(result.events, true);
+  return result;
+}
+
+function publicListingKey(key) {
+  const match = typeof key === 'string' && /^listing:(.+):(\d{4}-\d{2}-\d{2})$/.exec(key);
+  check(match && listingUrl(match[1], match[1]), 'public listing key');
+  const canonical = new URL(listingUrl(match[1], match[1]));
+  return 'listing:' + canonical.origin + canonical.pathname + ':' + date(match[2]);
+}
+
+function checkedPublicListing(value, key) {
+  const v = obj(value, 'public listing');
+  const day = date(v.announcementDate);
+  const baseUrl = listingUrl(v.baseUrl, v.baseUrl);
+  check(baseUrl && publicListingKey('listing:' + baseUrl + ':' + day) === publicListingKey(key), 'public listing identity');
+  check(v.complete === true && list(v.warnings, 'listing warnings').length === 0, 'complete listing');
+  check(list(v.integrityWarnings ?? [], 'listing integrity warnings').length === 0 &&
+    list(v.nextUrls ?? [], 'remaining listing pages').length === 0, 'finished listing');
+  const seen = new Set();
+  const papers = list(v.papers, 'listing papers').map(raw => {
+    const p = checkedPaper(raw);
+    check(!seen.has(p.id) && p.section && p.announcementDate === day, 'unique, dated listing paper');
+    seen.add(p.id);
+    return p;
+  });
+  const counts = listingCounts(papers);
+  check(v.advertisedTotal === counts.total && Object.keys(counts).every(k => v.counts?.[k] === counts[k]), 'listing counts');
+  for (const [k, n] of Object.entries(obj(v.sectionTotals ?? {}, 'advertised section counts'))) {
+    check(SECTIONS.includes(k) && counts[k] === n, 'advertised section count');
+  }
+  return {papers, counts, announcementDate: day, advertisedTotal: counts.total, baseUrl,
+    complete: true, sectionTotals: Object.fromEntries(SECTIONS.map(k => [k, counts[k]])), nextUrls: [], warnings: [], integrityWarnings: []};
+}
+
+return {SCHEMA_VERSION,COLLECTIONS,DEFAULT_SETTINGS,recordKey,checkedPaper,mergePaperMetadata,mergedSettings,checkedRecord,checkRevisionGraph,emptyState,validateImport,publicListingKey,checkedPublicListing};
+},
+"src/feed-settings.js": (__require) => {
+const {CATEGORIES} = __require("src/categories.js");
+
+const FEEDS = Object.freeze([
+  ['today','Today'], ['trending','Trending'], ['rising','Rising'], ['for-you','For You'],
+  ['discovery','Discovery'], ['subscriptions','Subscriptions'], ['highlights','Highlights'],
+  ['random','Random'], ['recent','Recent'], ['saved','Saved']
+]);
+
+const DEFAULT_FEED_SETTINGS = Object.freeze({
+  landing: 'today', categories: [], includeCross: true, includeReplacements: true,
+  maxDisplayed: 0, refreshMinutes: 60, minimumCoverage: 0.75, maxMetricAgeHours: 48,
+  provider: 'none', metric: '', showRaw: true, showGrowth: true,
+  randomBalanced: true, randomCount: 50, discoveryIntensity: 1,
+  author: '', date: '', reading: 'all', bookmark: 'all', section: 'all', search: '',
+  savedSort: 'saved', highlightBatch: 1
+});
+
+// Additive settings keep old backups and the established interest model intact.
+function checkedFeedSettings(raw = {}) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid feed settings.');
+  const s = {...DEFAULT_FEED_SETTINGS, ...raw};
+  const result = {};
+  const choice = (key, values) => {
+    if (!values.includes(s[key])) throw new Error('Invalid feed setting: ' + key + '.');
+    result[key] = s[key];
+  };
+  const number = (key, low, high, integer = false) => {
+    if (!Number.isFinite(s[key]) || s[key] < low || s[key] > high || (integer && !Number.isInteger(s[key]))) throw new Error('Invalid feed setting: ' + key + '.');
+    result[key] = s[key];
+  };
+  choice('landing', FEEDS.map(([id]) => id));
+  for (const key of ['includeCross','includeReplacements','showRaw','showGrowth','randomBalanced']) {
+    if (typeof s[key] !== 'boolean') throw new Error('Invalid feed setting: ' + key + '.');
+    result[key] = s[key];
+  }
+  if (!Array.isArray(s.categories) || s.categories.length > 32 || s.categories.some(c => !Object.hasOwn(CATEGORIES,c))) throw new Error('Invalid feed categories.');
+  result.categories = [...new Set(s.categories)].sort();
+  number('maxDisplayed',0,10000,true); number('refreshMinutes',15,10080,true);
+  number('minimumCoverage',0.25,1); number('maxMetricAgeHours',1,168);
+  number('randomCount',1,200,true); number('discoveryIntensity',0,1); number('highlightBatch',1,10,true);
+  for (const key of ['provider','metric','author','date','search']) {
+    if (typeof s[key] !== 'string' || s[key].length > (['author','search'].includes(key) ? 500 : 100)) throw new Error('Invalid feed setting: ' + key + '.');
+    result[key] = s[key].trim();
+  }
+  if (!/^[a-z0-9_-]+$/.test(result.provider) || !/^[a-z0-9_.:-]*$/i.test(result.metric)) throw new Error('Invalid provider or metric.');
+  if (result.date && (!/^\d{4}-\d{2}-\d{2}$/.test(result.date) || new Date(result.date + 'T00:00:00Z').toISOString().slice(0,10) !== result.date)) throw new Error('Invalid announcement date.');
+  choice('reading',['all','read','unread']); choice('bookmark',['all','saved','unsaved']);
+  choice('section',['all','new','cross','replacement','unknown']); choice('savedSort',['saved','date','title']);
+  return result;
+}
+
+return {FEEDS,DEFAULT_FEED_SETTINGS,checkedFeedSettings};
 },
 "src/app.js": (__require) => {
 const {CATEGORIES} = __require("src/categories.js");
@@ -2027,6 +2992,8 @@ const {element,link,field,select,checkbox,STYLES} = __require("src/dom.js");
 const {feedbackCSV,readingCSV,bookmarksBibtex,downloadText} = __require("src/exports.js");
 const {gmRequest} = __require("src/transport.js");
 const {mathFragment} = __require("src/math.js");
+const {FeedController} = __require("src/feed-ui.js");
+const {mergePaperMetadata} = __require("src/schema.js");
 
 const MODES=[['random','Pure Random'],['balanced','Balanced Exploration'],['personalized','Personalized'],['discovery','Discovery'],['subscriptions','Subscriptions']];
 const LEVELS=['Unfamiliar','Introduced','Developing','Comfortable','Proficient','Advanced'];
@@ -2040,6 +3007,7 @@ class DiscoveryApp {
     this.store=store;this.state=null;this.hosts=[];this.roots=[];this.cache=new PublicCache();this.currentPanel=null;
     this.listing=null;this.article=null;this.paperNodes=new Map();this.currentPaper=null;this.activeSelection=null;
     this.paperTools=new Map();this.inlineAI=new Map();this.mounted=false;this.viewEpoch=0;this.listView=null;
+    this.feeds=new FeedController(this);
     this.selectionHandler=e=>this.handleSelection(e);this.keyHandler=e=>this.handleKeys(e);
   }
   async initialize() {
@@ -2052,9 +3020,9 @@ class DiscoveryApp {
     for(const paper of papers) {
       // Standalone metadata must not overwrite the known announcement cycle.
       const previous=this.state.papers[paper.id];
-      if(previous&&!paper.announcementDate) paper.announcementDate=previous.announcementDate;
-      if(previous&&!paper.section) paper.section=previous.section;
-      this.state.papers[paper.id]={...previous,...paper};
+      if(!this.listing&&previous&&!paper.announcementDate) paper.announcementDate=previous.announcementDate;
+      if(!this.listing&&previous&&!paper.section) paper.section=previous.section;
+      this.state.papers[paper.id]=mergePaperMetadata(previous,paper);
     }
     try{await this.store.cachePapers(papers.map(p=>this.state.papers[p.id]));}
     catch{this.state.storageWarnings=[...(this.state.storageWarnings||[]),'Some public paper metadata could not be cached. The original page is unchanged; saving an unusually large or malformed record may fail.'];}
@@ -2064,7 +3032,7 @@ class DiscoveryApp {
       cacheSet:async(key,value,generation)=>{if(!await this.store.setIfGeneration('explanations',key,value,generation))throw new Error('Personal data changed during generation; the answer was not saved.');this.state.explanations[key]=value;}});
     this.store.subscribe(()=>this.refreshExternal());
     if(typeof GM_registerMenuCommand==='function') {
-      const commands=[['Show arXiv Discovery',()=>this.show()],['Daily selection',()=>this.openDaily()],
+      const commands=[['Show arXiv Discovery',()=>this.show()],['Research feeds',()=>this.feeds.openMenu()],['Daily selection',()=>this.openDaily()],
         ['Show all papers',()=>this.showAllPapers()],['Previous daily selections',()=>this.openPrevious()],
         ['Explore a category',()=>this.openCategory()],['Bookmarks and reading',()=>this.openBookmarks()],
         ['Followed researchers',()=>this.openAuthors()],['Interests and training history',()=>this.openInterests()],
@@ -2079,7 +3047,7 @@ class DiscoveryApp {
         catch(error){this.notify(error.message||String(error));}
       });
     }
-    if(this.state.settings.mode!=='original') await this.mount();
+    if(this.state.settings.mode!=='original') {await this.mount();if(this.toolsEnabled())await this.feeds.resume();}
   }
   retrain() {
     this.model=trainModel(this.state.events,this.state.settings);
@@ -2094,7 +3062,16 @@ class DiscoveryApp {
     for(const root of this.roots)for(const row of root.querySelectorAll('.actions[data-paper-id]')){const paper=this.state.papers[row.dataset.paperId];if(paper)row.replaceWith(this.paperActions(paper,row._entry));else row.remove();}
     this.refreshPaperSettings();
   }
-  async rememberPaper(paper) {await this.store.cachePapers([paper]);this.state.papers[paper.id]=paper;}
+  async rememberPaper(paper) {
+    // Saved can display a historical version. Status changes must not replace
+    // the canonical metadata used by the current native listing or other tabs.
+    const live=this.feeds.active==='saved'?this.feeds.liveMetadata.get(paper.id):null;
+    await this.store.cachePapers([live||paper]);this.state.papers[paper.id]=paper;
+  }
+  async bookmarkPaper(paper) {
+    const at=isoNow(),snapshot=await this.store.bookmarkPaper(paper,at);
+    this.state.bookmarks[paper.id]=at;this.state.savedPapers[paper.id]=snapshot;
+  }
   async refreshExternal() {
     this.closePanel();this.clearInlineAI();this.showAllPapers();await this.reload();
     if(this.state.settings.mode==='original')this.unmount();
@@ -2130,7 +3107,7 @@ class DiscoveryApp {
     const launcher=this.rootHost('arxiv-discovery-settings',target,target.firstChild);
     this.settingsHost=launcher.host;
     this.settingsButton=element('button',{type:'button',class:'settings-launcher','aria-label':'Discovery settings','aria-haspopup':'dialog',onclick:event=>{if(event.isTrusted)this.openSettings();}},'Settings');
-    launcher.root.append(this.settingsButton);
+    launcher.root.append(this.button('Feeds',()=>this.feeds.openMenu(),{'aria-label':'Research feeds'}),' ',this.settingsButton);
   }
   async show() {
     if(this.state.settings.mode==='original'||!this.state.settings.showTools)this.state.settings=await this.store.settings({mode:this.state.settings.mode==='original'?this.state.settings.previousMode||'random':this.state.settings.mode,showTools:true});
@@ -2239,12 +3216,13 @@ class DiscoveryApp {
       if(authors)tools.root.querySelector('.authors')?.replaceWith(this.authorControls(paper));
       if(spoilers)for(const input of tools.root.querySelectorAll('.paper-protection input'))input.checked=this.noSpoilers(paper);
     }
+    if(spoilers)this.feeds.refreshProtection();
   }
   removeHost(host) {if(!host)return;host.remove();this.hosts=this.hosts.filter(h=>h!==host);this.roots=this.roots.filter(r=>r.host!==host);}
   clearInlineAI() {for(const body of this.inlineAI.values())body.remove();this.inlineAI.clear();this.selectionBubble?.remove();this.selectionBubble=null;}
   moreTools() {
     const row=element('div',{class:'more-actions'});
-    const commands=[['Daily selection',()=>this.openDaily()],['Show all papers',()=>this.showAllPapers()],['Previous selections',()=>this.openPrevious()],['All papers in a category',()=>this.openCategory()],['Bookmarks',()=>this.openBookmarks()],['Authors',()=>this.openAuthors()],['Interests',()=>this.openInterests()],['Knowledge',()=>this.openKnowledge()],['Settings',()=>this.openSettings()],['Original arXiv',()=>this.hide()]];
+    const commands=[['Research feeds',()=>this.feeds.openMenu()],['Daily selection',()=>this.openDaily()],['Show all papers',()=>this.showAllPapers()],['Previous selections',()=>this.openPrevious()],['All papers in a category',()=>this.openCategory()],['Bookmarks',()=>this.openBookmarks()],['Authors',()=>this.openAuthors()],['Interests',()=>this.openInterests()],['Knowledge',()=>this.openKnowledge()],['Settings',()=>this.openSettings()],['Original arXiv',()=>this.hide()]];
     for(const [label,action] of commands)row.append(this.button(label,action));
     return element('details',{class:'more-tools'},element('summary',{},'More tools'),row);
   }
@@ -2256,7 +3234,7 @@ class DiscoveryApp {
     const reason=select(REASONS.map(r=>[r,r||'Optional feedback reason']),latest?.reason||'');reason.className='feedback-reason';reason.setAttribute('aria-label','Feedback reason');
     const rate=async value=>{
       if(reason.value==='Insufficient mathematical background') value='background';
-      const e=await this.store.feedback(paper,value,reason.value,this.state.settings.mode,entry?.probability??null);
+      const e=await this.store.feedback(paper,value,reason.value,this.feeds.feedbackMode(),entry?.probability??null);
       this.state.events.push(e);this.retrain();this.refreshActionRows(paper);this.updateStatus();
       if(this.progress) this.updateProgress();
     };
@@ -2265,8 +3243,8 @@ class DiscoveryApp {
       this.button('Need background',()=>rate('background'),{'aria-pressed':String(latest?.value==='background')}),
       this.button('Skip',()=>rate('neutral')),this.button('Clear feedback',()=>rate('removed')),reason,
       this.button(this.state.bookmarks[paper.id]?'Bookmarked':'Bookmark',async()=>{
-        if(this.state.bookmarks[paper.id]){await this.store.remove('bookmarks',paper.id);delete this.state.bookmarks[paper.id];}
-        else {await this.rememberPaper(paper);this.state.bookmarks[paper.id]=isoNow();await this.store.set('bookmarks',paper.id,this.state.bookmarks[paper.id]);}
+        if(this.state.bookmarks[paper.id]){await this.store.remove('bookmarks',paper.id);delete this.state.bookmarks[paper.id];delete this.state.savedPapers[paper.id];}
+        else await this.bookmarkPaper(paper);
         this.refreshActionRows(paper);
       },{'aria-pressed':String(!!this.state.bookmarks[paper.id])}),
       this.button(this.state.reading[paper.id]?'Read':'Mark as read',async()=>{
@@ -2280,7 +3258,7 @@ class DiscoveryApp {
   }
   refreshActionRows(paper) {
     const row=this.paperTools.get(paper.id)?.root.querySelector('.actions[data-paper-id]');
-    if(row)row.replaceWith(this.paperActions(paper,row._entry));
+    if(row)row.replaceWith(this.paperActions(row._paper||paper,row._entry));
   }
   authorControls(paper) {
     const row=element('div',{class:'authors'},'Authors: ');
@@ -2373,6 +3351,7 @@ class DiscoveryApp {
   }
   showAllPapers() {
     ++this.viewEpoch;this.nativeListing?.restore();this.activeSelection=null;this.activeSelectionKey=null;this.listView=null;this.progress=null;
+    this.feeds.clear();
     for(const {root} of this.paperTools.values())root.querySelector('.selection-note')?.remove();
     this.removeHost(this.listHost);this.listHost=null;this.listRoot=null;
     for(const root of this.roots)for(const row of root.querySelectorAll('.actions[data-paper-id]'))if(row._entry)row.replaceWith(this.paperActions(row._paper));
@@ -2491,7 +3470,7 @@ class DiscoveryApp {
     body.append(element('div',{class:'row'},this.button('Export bookmarks (BibTeX)',()=>downloadText('arxiv-bookmarks.bib',bookmarksBibtex(this.state),'application/x-bibtex')),this.button('Export reading history (CSV)',()=>downloadText('arxiv-reading.csv',readingCSV(this.state),'text/csv'))));
     const ids=Object.keys(this.state.bookmarks).sort((a,b)=>this.state.bookmarks[b].localeCompare(this.state.bookmarks[a]));
     body.append(element('h3',{},`${ids.length} bookmarked papers`));if(!ids.length)body.append(element('p',{},'Use Bookmark on any paper to save it here.'));
-    this.pagedPapers(body,ids.map(id=>this.state.papers[id]).filter(Boolean));
+    this.pagedPapers(body,ids.map(id=>this.state.savedPapers[id]||this.state.papers[id]).filter(Boolean));
     const history=element('details',{},element('summary',{},`Reading history (${Object.keys(this.state.reading).length})`));
     history.append(element('ul',{},Object.entries(this.state.reading).sort((a,b)=>String(b[1]).localeCompare(String(a[1]))).map(([id,date])=>element('li',{},`${fmtDate(date)} · `,link(this.state.papers[id]?.title||id,`https://arxiv.org/abs/${id}`)))));body.append(history);
   }
@@ -2500,7 +3479,7 @@ class DiscoveryApp {
     const draw=()=>{
       holder.replaceChildren(element('ul',{},papers.slice(page*40,(page+1)*40).map(p=>{
         const item=this.paperReference(p);
-        item.append(' ',this.button('Remove bookmark',async()=>{await this.store.remove('bookmarks',p.id);delete this.state.bookmarks[p.id];this.refreshActionRows(p);this.openBookmarks();}));return item;
+        item.append(' ',this.button('Remove bookmark',async()=>{await this.store.remove('bookmarks',p.id);delete this.state.bookmarks[p.id];delete this.state.savedPapers[p.id];this.refreshActionRows(p);this.openBookmarks();}));return item;
       })));
       if(papers.length>40)holder.append(element('div',{class:'row'},this.button('Previous page',()=>{page--;draw();},{disabled:page===0}),element('span',{},`Page ${page+1} / ${Math.ceil(papers.length/40)}`),this.button('Next page',()=>{page++;draw();},{disabled:(page+1)*40>=papers.length})));
     };draw();
@@ -2600,7 +3579,7 @@ class DiscoveryApp {
       catch(error){input.checked=this.toolsEnabled();this.notify(error.message||String(error));}
       finally{pendingEnable=null;if(input.isConnected)input.removeAttribute('aria-busy');}
     });
-    body.append(enabled,field('Recommendation mode',this.modePicker()),daily);
+    body.append(enabled,field('Recommendation mode',this.modePicker()),daily,this.button('Research feeds',()=>this.feeds.openMenu()),this.button('Feed settings',()=>this.feeds.openSettings()));
     if(this.state.storageWarnings?.length)body.append(element('div',{class:'notice'},'Some saved records could not be loaded:',element('ul',{},this.state.storageWarnings.map(w=>element('li',{},w)))));
     body.append(element('h3',{},'Discovery'),checkbox('Include cross-submissions',s.includeCross,async e=>{this.showAllPapers();this.state.settings=await this.store.settings({includeCross:e.target.checked});}),
       checkbox('Include replacement submissions',s.includeReplacements,async e=>{this.showAllPapers();this.state.settings=await this.store.settings({includeReplacements:e.target.checked});}),
@@ -2620,10 +3599,10 @@ class DiscoveryApp {
       const file=input.files?.[0];if(!file)throw new Error('Choose a JSON backup first.');if(file.size>50000000)throw new Error('The backup exceeds 50 MB.');
       const data=JSON.parse(await file.text());await this.store.import(data);this.showAllPapers();this.clearInlineAI();await this.reload();this.syncPaperTools();this.openSettings();this.notify('Backup imported. The AI bridge must be paired and enabled again.');
     }));
-    const groups=[['events','Feedback'],['bookmarks','Bookmarks'],['reading','Reading history'],['subscriptions','Author subscriptions'],['knowledge','Knowledge profile'],['glossary','Glossary'],['explanations','Cached AI explanations'],['selections','Saved daily selections']];
+    const groups=[['events','Feedback'],['bookmarks','Bookmarks'],['reading','Reading history'],['subscriptions','Author subscriptions'],['knowledge','Knowledge profile'],['glossary','Glossary'],['explanations','Cached AI explanations'],['highlights','AI highlight assessments'],['selections','Saved daily selections']];
     const category=select(groups,'events');body.append(field('Selective deletion',category),this.button('Delete selected data',async()=>{if(!confirm(`Permanently delete ${groups.find(g=>g[0]===category.value)[1].toLowerCase()}?`))return;await this.store.clearCollection(category.value);this.showAllPapers();this.clearInlineAI();await this.reload();this.openSettings();}),
       this.button('Delete all local data',async()=>{if(!confirm('Permanently delete all arXiv Discovery data, settings, pairing and cached explanations on this browser? Export a backup first if needed.'))return;await this.store.clearAll();await this.cache.clear();this.showAllPapers();this.clearInlineAI();await this.reload();this.syncPaperTools();this.openSettings();this.notify('All saved Discovery data has been deleted.');},{class:'danger'}),
-      element('p',{class:'version'},'arXiv Discovery 1.2.0 · Independent userscript · Thank you to arXiv for use of its open access interoperability.'),
+      element('p',{class:'version'},'arXiv Discovery 1.3.0 · Independent userscript · Thank you to arXiv for use of its open access interoperability.'),
       link('Source, documentation and issues','https://github.com/sodium-qed/arXiv-scroller'));
   }
   aiSettings(body) {
@@ -2728,7 +3707,7 @@ class DiscoveryApp {
       const id=node.closest?.('[data-paper-id]')?.dataset.paperId;if(id&&this.state.papers[id])focusedPaper=this.state.papers[id];
       if(!focusedPaper)for(const [paperId,nodes] of this.paperNodes)if(nodes.dt.contains(node)||nodes.dd.contains(node)){focusedPaper=this.state.papers[paperId];break;}
     }
-    const papers=this.listing?this.nativeListing.visibleIds().map(id=>this.state.papers[id]).filter(Boolean):[this.article].filter(Boolean);if(!papers.length)return;
+    const papers=this.listing?this.feeds.visibleIds().map(id=>this.state.papers[id]).filter(Boolean):[this.article].filter(Boolean);if(!papers.length)return;
     if(focusedPaper&&!papers.some(p=>p.id===focusedPaper.id))focusedPaper=null;
     if(focusedPaper)this.currentPaper=focusedPaper;
     event.preventDefault();let index=papers.findIndex(p=>p.id===this.currentPaper?.id);
@@ -2737,8 +3716,8 @@ class DiscoveryApp {
       this.focusPaper(paper.id);return;
     }
     const paper=focusedPaper||papers[Math.max(0,index)];this.currentPaper=paper;
-    const run=async()=>{if(key==='l'||key==='d'){const e=await this.store.feedback(paper,key==='l'?'like':'dislike','',this.state.settings.mode,this.selectionEntry(paper.id)?.probability??null);this.state.events.push(e);this.retrain();}
-      if(key==='b'){if(this.state.bookmarks[paper.id]){await this.store.remove('bookmarks',paper.id);delete this.state.bookmarks[paper.id];}else{await this.rememberPaper(paper);this.state.bookmarks[paper.id]=isoNow();await this.store.set('bookmarks',paper.id,this.state.bookmarks[paper.id]);}}
+    const run=async()=>{if(key==='l'||key==='d'){const e=await this.store.feedback(paper,key==='l'?'like':'dislike','',this.feeds.feedbackMode(),this.selectionEntry(paper.id)?.probability??null);this.state.events.push(e);this.retrain();}
+      if(key==='b'){if(this.state.bookmarks[paper.id]){await this.store.remove('bookmarks',paper.id);delete this.state.bookmarks[paper.id];delete this.state.savedPapers[paper.id];}else await this.bookmarkPaper(paper);}
       if(key==='r'){if(this.state.reading[paper.id]){await this.store.remove('reading',paper.id);delete this.state.reading[paper.id];}else{await this.rememberPaper(paper);this.state.reading[paper.id]=isoNow();await this.store.set('reading',paper.id,this.state.reading[paper.id]);}}this.refreshActionRows(paper);this.updateProgress();this.updateStatus();};run().catch(e=>this.notify(e.message));
   }
 }
@@ -2870,14 +3849,15 @@ function optionsFor(papers, options) {
   const requested = options.mode || settings.mode;
   const mode = MODES.has(requested) ? requested : 'random';
   const date = options.date || '';
+  const recent = options.population === 'recent' && options.complete === true;
   const seed = options.seed ?? (date + '|' + mode);
   const byId = new Map();
   const availableSections = new Map(CODES.map(code => [code, new Set()]));
-  if (/^\d{4}-\d{2}-\d{2}$/.test(date)) for (const paper of papers || []) {
-    if (!paper || typeof paper.id !== 'string' || !paper.id || paper.announcementDate !== date) continue;
+  if (recent || /^\d{4}-\d{2}-\d{2}$/.test(date)) for (const paper of papers || []) {
+    if (!paper || typeof paper.id !== 'string' || !paper.id || (!recent && paper.announcementDate !== date)) continue;
     const codes = paperCategories(paper);
     for (const code of codes) availableSections.get(code).add(paper.section);
-    if (!codes.length || !eligibleSection(paper.section, settings)) continue;
+    if (!codes.length || (!(recent && paper.section == null) && !eligibleSection(paper.section, settings))) continue;
     const previous = byId.get(paper.id);
     if (!previous) {
       byId.set(paper.id, paper);
@@ -2913,6 +3893,7 @@ function optionsFor(papers, options) {
     exploration: Number.isFinite(exploration) ? Math.max(0, Math.min(1, exploration)) : 0.25,
     count: Number.isFinite(count) ? Math.max(1, Math.min(200, Math.trunc(count))) : 50,
     encounters: mode === 'discovery' ? encountered(options, byId) : null,
+    discoveryIntensity: recent ? Math.min(1, Math.max(0, Number(options.discoveryIntensity ?? 1))) : 1,
     incomplete: options.complete === false,
   };
 }
@@ -2959,7 +3940,7 @@ function novelty(paper, ctx) {
     denominator += importance;
   }
   const score = total / (denominator || 1) - (known.ids.has(paper.id) ? 0.6 : 0);
-  return {weight: Math.exp(4.5 * score), totalTopics: topicLabels.length,
+  return {weight: Math.exp(4.5 * ctx.discoveryIntensity * score), totalTopics: topicLabels.length,
     newTopics: topicLabels.filter(term => !known.topics.has(term)).length,
     totalAuthors: authorLabels.length, newAuthors: authorLabels.filter(id => !known.authors.has(id)).length};
 }
@@ -3167,6 +4148,13 @@ function generateSelection(papers, options = {}) {
   return result;
 }
 
+// Reuse the same matching, weights and identity rules for a verified multi-date
+// Recent population. This does not turn source dates into a synthetic "today".
+function generateRecentSelection(population, options = {}) {
+  if (population?.population !== 'recent' || population.complete !== true) throw new Error('A complete authoritative Recent population is required.');
+  return generateSelection(population.papers, {...options, population:'recent', date:'', complete:true});
+}
+
 function crossListedReplacement(selection, paperId, target, ctx) {
   const rankings = new Map();
   const byPaper = new Map();
@@ -3230,7 +4218,7 @@ function replaceSelectionPaper(selection, paperId, papers, options = {}) {
   return entries ? {...selection, entries, seed: ctx.seed} : null;
 }
 
-return {generateSelection,replaceSelectionPaper};
+return {generateSelection,generateRecentSelection,replaceSelectionPaper};
 },
 "src/ai.js": (__require) => {
 // Changing the grounding protocol or response policy must invalidate old explanations.
@@ -3242,6 +4230,8 @@ const ID_PATTERN = /^(?:\d{4}\.\d{4,5}|[a-z][a-z.-]*\/\d{7})$/i;
 const MODEL_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/;
 const LEVELS = new Set(['unfamiliar', 'introduced', 'developing', 'comfortable', 'proficient', 'advanced']);
 const MAX_UNKNOWN_VERSION_AGE = 60 * 60 * 1000;
+const HIGHLIGHT_BASES = new Set(['open_problem', 'bound', 'method', 'connection', 'generalization', 'computation']);
+const PROTECTED_HIGHLIGHT_REASON = 'No Spoilers is active. A highlight assessment has not been established because assessing new results could reveal protected material.';
 const DETAIL_VALUES = new Map([
   ['standard', 'standard'], ['simple', 'simpler'], ['simpler', 'simpler'],
   ['rigorous', 'rigorous'], ['more rigorous', 'rigorous']
@@ -3311,7 +4301,30 @@ function safeSourceUrl(value, kind, paper, allowFragment) {
   }
 }
 
-function checkResult(data, paper) {
+function checkHighlight(value, source, paper, noSpoilers) {
+  const invalid = () => { throw new Error('The bridge returned an invalid or ungrounded highlight decision.'); };
+  if (!value || !['candidate', 'not_established'].includes(value.status) || !Array.isArray(value.basis) ||
+      value.basis.length > HIGHLIGHT_BASES.size || value.basis.some(b => !HIGHLIGHT_BASES.has(b)) ||
+      new Set(value.basis).size !== value.basis.length || !Array.isArray(value.citations) || value.citations.length > 8) invalid();
+  const reason = boundedText(value.reason, 2000, 'The highlight assessment reason');
+  if (!reason) invalid();
+  const citations = value.citations.map(item => {
+    const url = safeSourceUrl(item?.url, source.kind, paper, true);
+    if (!url || typeof item.label !== 'string' || !item.label || item.label.length > 260 ||
+        !Array.isArray(item.quotes) || !item.quotes.length || item.quotes.length > 8 ||
+        item.quotes.some(q => typeof q !== 'string' || q.length < 8 || q.length > 320)) invalid();
+    // Decision evidence must also be part of the bridge's verified source set.
+    const verified = source.citations.find(c => c.url === url && c.label === item.label);
+    if (!verified || item.quotes.some(q => !verified.quotes.includes(q))) invalid();
+    return {label:item.label, url, quotes:[...item.quotes]};
+  });
+  if (value.status === 'candidate') {
+    if (noSpoilers || !value.basis.length || !citations.length) invalid();
+  } else if (value.basis.length || citations.length) invalid();
+  return {status:value.status, basis:[...value.basis], reason:noSpoilers ? PROTECTED_HIGHLIGHT_REASON : reason, citations};
+}
+
+function checkResult(data, paper, {action, noSpoilers = false} = {}) {
   const text = boundedText(data?.text, 64000, 'The explanation');
   const source = data?.source;
   const url = safeSourceUrl(source?.url, source?.kind, paper, false);
@@ -3325,6 +4338,15 @@ function checkResult(data, paper) {
     }
   }
   const result = { text, source: { kind: source.kind, url, note: boundedText(source.note, 2200, 'The source note'), citations } };
+  if (action === 'highlight') {
+    result.highlight = checkHighlight(data.highlight, result.source, paper, noSpoilers);
+    if (noSpoilers) {
+      // Never display model prose or quotations for a protected highlight request.
+      result.text = PROTECTED_HIGHLIGHT_REASON;
+      result.source.note = 'No result assessment is displayed while No Spoilers is active.';
+      result.source.citations = [];
+    }
+  }
   if (data.usage && typeof data.usage === 'object') {
     result.usage = {};
     for (const key of ['inputTokens', 'outputTokens', 'estimatedCostUsd', 'dailyRequests', 'dailyCostUsd']) {
@@ -3356,6 +4378,10 @@ class AIClient {
     return this.generate('overview', paper, '', options);
   }
 
+  async highlight(paper, options = {}) {
+    return this.generate('highlight', paper, '', {...options, profile:'full'});
+  }
+
   async explain(paper, term, options = {}) {
     const selection = boundedText(term, 500, 'The selected term');
     if (!selection) throw new Error('Select a word, expression, or short mathematical phrase.');
@@ -3381,7 +4407,7 @@ class AIClient {
       throw new Error('A valid arXiv paper and version are required.');
     }
     const limits = requestLimits(ai);
-    const profile = provider === "local" ? (options.profile || (options.detail === "rigorous" || options.question ? "full" : ai.profile || "quick")) : "full";
+    const profile = action === 'highlight' ? 'full' : provider === "local" ? (options.profile || (options.detail === "rigorous" || options.question ? "full" : ai.profile || "quick")) : "full";
     if (!["quick", "full"].includes(profile)) throw new Error("Choose a supported AI reading profile.");
     if (profile === "quick") {
       limits.maxInputChars = Math.min(limits.maxInputChars, 4000);
@@ -3417,7 +4443,7 @@ class AIClient {
       const age = Date.now() - saved?.savedAt;
       const cacheAgeLimit = !paper.version ? MAX_UNKNOWN_VERSION_AGE : saved?.source?.kind === 'abstract' ? 86400000 : Infinity;
       if (saved && age >= 0 && age < cacheAgeLimit) {
-        try { return { ...checkResult(saved, paper), cached: true }; } catch { /* Replace invalid imported cache entries. */ }
+        try { return { ...checkResult(saved, paper, {action, noSpoilers}), cached: true }; } catch { /* Replace invalid imported cache entries. */ }
       }
       if (!limits.dailyRequests || (provider !== 'local' && !limits.dailyBudget)) {
         throw new Error('The configured daily AI allowance is zero.');
@@ -3469,7 +4495,7 @@ class AIClient {
       const cause = typeof data?.error === 'string' ? data.error.slice(0, 500) : 'Check the bridge configuration.';
       throw new Error('AI request failed (' + status + '). ' + cause);
     }
-    const result = checkResult(data, body.paper);
+    const result = checkResult(data, body.paper, {action:body.action, noSpoilers:body.noSpoilers});
     try {
       await this.cacheSet(key, { ...result, paperId: body.paper.id, version: body.paper.version, savedAt: Date.now() }, generation);
     } catch {
@@ -3544,6 +4570,7 @@ summary{cursor:pointer;display:list-item;max-width:max-content}
 :host(#ad-listing-controls){margin:12px 0;font-size:14px}.listing-summary{margin:4px 0}.selection-options{font-size:13px;margin:6px 0}.selection-options>.field{margin:8px 0}.selection-options .muted{color:inherit;opacity:.8}
 .selection-distribution{font-size:13px;margin:8px 0;max-width:100%;min-width:0}.category-distribution .table-wrap{max-width:100%;margin:8px 0}.category-distribution table{min-width:720px}.category-distribution .muted{color:inherit;opacity:.8}
 .inline-notice{font-size:13px;max-width:80ch}.inline-ai{border-left:2px solid var(--line);padding:4px 14px;margin:12px 0;max-width:85ch;background:var(--bg);color:var(--fg)}.inline-ai h3{font-size:15px;margin:5px 0}.inline-ai button{color:var(--link)}
+.feed-note{border-left:2px solid var(--line);padding-left:10px}.feed-note details{display:block;margin-left:0}.feed-index{max-height:240px;overflow:auto;margin:8px 0}.feed-index ol{padding-left:25px}.feed-status{max-width:90ch}.field select[multiple]{width:100%;min-width:0;max-width:100%}
 .notice{padding:10px 12px;background:var(--soft);border-left:3px solid var(--accent);margin:10px 0}.error{border-left-color:#bd3030}
 dialog{padding:0;border:1px solid var(--line);border-radius:5px;color:var(--fg);background:var(--bg);width:min(940px,calc(100vw - 32px));max-width:calc(100vw - 32px);max-height:88vh;box-shadow:0 8px 40px #0003}dialog::backdrop{background:#0004}
 .dialog-header{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:16px 20px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:2}.dialog-body{padding:4px 20px 20px;overflow-wrap:anywhere}
@@ -3813,7 +4840,7 @@ function bookmarksBibtex(state) {
   // Bibliography metadata is text, never a source of executable TeX commands.
   const tex={'\\':'\\textbackslash{}','{':'\\{','}':'\\}','$':'\\$','&':'\\&','%':'\\%','#':'\\#','_':'\\_','~':'\\textasciitilde{}','^':'\\textasciicircum{}'};
   const esc=v=>String(v||'').replace(/[\\{}$&%#_~^]/g,c=>tex[c]).replace(/[\r\n]+/g,' ');
-  return Object.keys(state.bookmarks).map(id=>state.papers[id]).filter(Boolean).map(p=>`@misc{arxiv${p.id.replace(/[^a-zA-Z0-9]/g,'')},\n  title = {${esc(p.title)}},\n  author = {${p.authors.map(a=>esc(a.name)).join(' and ')}},\n  eprint = {${esc(p.id)}},\n  archivePrefix = {arXiv},\n  primaryClass = {${esc(p.primaryCategory)}},\n  year = {${String(p.announcementDate||'').slice(0,4)}},\n  url = {https://arxiv.org/abs/${p.id}}\n}`).join('\n\n')+'\n';
+  return Object.keys(state.bookmarks).map(id=>state.savedPapers?.[id]||state.papers[id]).filter(Boolean).map(p=>`@misc{arxiv${p.id.replace(/[^a-zA-Z0-9]/g,'')},\n  title = {${esc(p.title)}},\n  author = {${p.authors.map(a=>esc(a.name)).join(' and ')}},\n  eprint = {${esc(p.id)}},\n  archivePrefix = {arXiv},\n  primaryClass = {${esc(p.primaryCategory)}},\n  year = {${String(p.announcementDate||'').slice(0,4)}},\n  url = {https://arxiv.org/abs/${p.id}}\n}`).join('\n\n')+'\n';
 }
 function downloadText(filename,text,type='text/plain') {
   const blob=new Blob([text],{type:`${type};charset=utf-8`});const url=URL.createObjectURL(blob);
@@ -3874,6 +4901,489 @@ function gmRequest(url,options={}) {
 }
 
 return {backoffUntil,gmRequest};
+},
+"src/feed-ui.js": (__require) => {
+const {FEEDS, buildFeed} = __require("src/feeds.js");
+const {CATEGORIES} = __require("src/categories.js");
+const {parseListing} = __require("src/parser.js");
+const {loadCompleteListing} = __require("src/network.js");
+const {gmRequest} = __require("src/transport.js");
+const {METRIC_DEFINITIONS} = __require("src/readership.js");
+const {element, link, field, select, checkbox, richText} = __require("src/dom.js");
+const {downloadText, bookmarksBibtex} = __require("src/exports.js");
+const {makeId} = __require("src/storage.js");
+const {mergePaperMetadata} = __require("src/schema.js");
+const {mathFragment} = __require("src/math.js");
+
+const LABEL = Object.fromEntries(FEEDS);
+const RECENT_URL = 'https://arxiv.org/list/math/recent?skip=0&show=2000';
+const TODAY_URL = 'https://arxiv.org/list/math/new?skip=0&show=2000';
+const instant = value => new Date(value).toISOString();
+
+function parseHTML(html) {
+  const template = document.createElement('template');
+  template.innerHTML = html;
+  return template.content;
+}
+
+function sameCycle(a,b) {
+  if (!a || !b || a.population !== b.population || a.advertisedTotal !== b.advertisedTotal || a.cohortSignature !== b.cohortSignature) return false;
+  const rows = new Map((b.sourceEntries || []).map(row => [row.index,row]));
+  return (a.sourceEntries || []).every(row => {
+    const other = rows.get(row.index);
+    return other && row.paperId === other.paperId && row.announcementDate === other.announcementDate && row.version === other.version;
+  });
+}
+
+// This controller adds controls and safely constructed missing native rows only
+// after a deliberate feed selection. Existing arXiv elements are never replaced.
+class FeedController {
+  constructor(app) {
+    this.app = app; this.active = null; this.result = null; this.population = null;
+    this.added = []; this.addedIds = new Set(); this.seed = makeId(); this.cacheInfo = null;
+    this.pageObservedAt = Date.now(); this.initialAvailable = true;
+    this.replacedNative = new Map(); this.liveMetadata = new Map();
+  }
+
+  async resume() {
+    const hash = new URLSearchParams(location.hash.slice(1));
+    const requested = hash.get('ad-feed');
+    if (requested && LABEL[requested]) return this.open(requested);
+    const preferred = this.app.state.settings.feeds.landing;
+    if (!location.hash && location.pathname === '/list/math/new' && preferred !== 'today' && this.app.toolsEnabled()) return this.open(preferred);
+  }
+
+  navigate(feed) {
+    const url = new URL(feed === 'today' ? TODAY_URL : RECENT_URL);
+    url.hash = 'ad-feed=' + feed;
+    location.assign(url.href);
+  }
+
+  openMenu() {
+    const app = this.app, body = app.panel('Research feeds','feeds');
+    const choice = select(FEEDS,this.active || app.state.settings.feeds.landing);
+    body.append(field('Feed',choice),app.button('Open selected feed',() => this.open(choice.value)),
+      app.button('Feed settings',() => this.openSettings()),
+      element('p',{class:'muted'},'Today uses arXiv’s latest announcement. Recent-based feeds use every page of the official Recent listing. Saved includes papers from any date.'));
+    body.append(element('dl',{},FEEDS.map(([id,label]) => [element('dt',{},label),element('dd',{}, {
+      today:'The saved daily selection and its existing recommendation mode.',
+      trending:'Observed external readership or attention, with coverage and freshness checks.',
+      rising:'Growth only when comparable cumulative measurements support it.',
+      'for-you':'The existing local interest model applied to Recent.',
+      discovery:'Unfamiliar categories, concepts and author labels.',
+      subscriptions:'Recent papers matching confirmed followed researchers.',
+      highlights:'On-demand AI assessments with source evidence; significance remains unverified.',
+      random:'Preference-independent random sampling from Recent.',
+      recent:'The complete chronological source population.',
+      saved:'All locally bookmarked papers, with search, filters and export.'
+    }[id])])));
+  }
+
+  clear() {
+    const app = this.app;
+    this.active = null; this.result = null;
+    for (const tools of app.paperTools.values()) for (const note of tools.root.querySelectorAll('.feed-note')) note.remove();
+    for (const id of this.addedIds) {
+      const tools = app.paperTools.get(id);
+      if (tools) { app.removeHost(tools.host); app.paperTools.delete(id); }
+      app.paperNodes.delete(id);
+      app.inlineAI.get(id)?.remove(); app.inlineAI.delete(id);
+    }
+    for (const node of this.added) node.remove();
+    this.added = []; this.addedIds.clear();
+    for (const [id,nodes] of this.replacedNative) app.paperNodes.set(id,nodes);
+    for (const [id,paper] of this.liveMetadata) if (paper) app.state.papers[id] = paper;
+    const replaced = this.replacedNative.size;
+    this.replacedNative.clear(); this.liveMetadata.clear();
+    if (replaced && app.mounted && app.toolsEnabled()) app.attachPaperTools();
+  }
+
+  feedbackMode() { return this.active && this.active !== 'today' ? this.active : this.app.state.settings.mode; }
+  visibleIds() {
+    const visible = new Set(this.app.nativeListing.visibleIds());
+    return this.result ? this.result.entries.map(entry => entry.paperId).filter(id => visible.has(id)) : [...visible];
+  }
+
+  async getPopulation(refresh, progress, generation, isCurrent = () => true) {
+    const app = this.app, maxAge = app.state.settings.feeds.refreshMinutes * 60000;
+    const initial = app.listing;
+    const assertCurrent = () => { if (!isCurrent()) throw new Error('Feed request cancelled.'); };
+    assertCurrent();
+    if (!refresh && this.population && sameCycle(initial,this.population) && this.cacheInfo && !this.cacheInfo.stale && Date.now()-this.cacheInfo.savedAt < maxAge) return this.population;
+    if (!refresh && this.initialAvailable && Date.now()-this.pageObservedAt < maxAge && initial?.population === 'recent' && initial.complete) {
+      this.initialAvailable = false;
+      const cachedInitial = await app.store.cacheFeedPopulation(initial,generation,this.pageObservedAt);
+      assertCurrent(); this.population = initial; this.cacheInfo = cachedInitial;
+      if (!this.cacheInfo) throw new Error('Saved data changed during loading.');
+      return initial;
+    }
+    const cached = await app.store.feedPopulation('recent',maxAge);
+    assertCurrent();
+    if (!refresh && cached && !cached.stale && sameCycle(initial,cached.population)) {
+      this.population = cached.population; this.cacheInfo = cached; return this.population;
+    }
+    let start = initial;
+    try {
+      if (refresh || initial?.population !== 'recent' || initial.complete || Date.now()-this.pageObservedAt >= maxAge) {
+        const response = await gmRequest(RECENT_URL);
+        assertCurrent();
+        if (response.status !== 200) throw new Error('arXiv returned HTTP ' + response.status + '.');
+        if (typeof response.text !== 'string' || response.text.length > 32*1024*1024) throw new Error('The listing response exceeds the supported size.');
+        start = parseListing(parseHTML(response.text),RECENT_URL);
+      }
+      const complete = await loadCompleteListing(start,{request:async (url,options) => {assertCurrent();const response=await gmRequest(url,options);assertCurrent();return response;},onProgress:progress});
+      assertCurrent();
+      if (!complete.complete) throw new Error(complete.warnings.join(' '));
+      // A live refresh can cross an announcement boundary. Navigate rather than
+      // mix current native rows with a different source snapshot.
+      if (!sameCycle(initial,complete)) {
+        this.navigate(this.active || 'recent');
+        throw new Error('The arXiv announcement population changed. Reloading its native listing.');
+      }
+      const cachedComplete = await app.store.cacheFeedPopulation(complete,generation);
+      assertCurrent(); this.population = complete; this.cacheInfo = cachedComplete;
+      if (!this.cacheInfo) throw new Error('Saved data changed during loading.');
+      return complete;
+    } catch (error) {
+      assertCurrent();
+      if (cached && sameCycle(initial,cached.population)) {
+        this.population = cached.population; this.cacheInfo = {...cached,offline:true,stale:true,error:error.message};
+        return this.population;
+      }
+      throw error;
+    }
+  }
+
+  async open(feed, {refresh = false, regenerate = false} = {}) {
+    const app = this.app;
+    if (!LABEL[feed]) throw new Error('Unknown feed.');
+    if (!app.toolsEnabled()) await app.show();
+    if (feed === 'today') {
+      if (location.pathname !== '/list/math/new') return this.navigate(feed);
+      return app.openDaily();
+    }
+    if (!app.listing || feed !== 'saved' && (location.pathname !== '/list/math/recent' || Number(new URL(location.href).searchParams.get('skip') || 0) !== 0)) return this.navigate(feed);
+    app.closePanel(); app.showAllPapers();
+    const epoch = app.viewEpoch, generation = await app.store.generation();
+    if (epoch !== app.viewEpoch || !app.mounted || !app.toolsEnabled()) return;
+    this.active = feed; if (regenerate) this.seed = makeId();
+    const root = app.listingControls();
+    const status = element('p',{class:'feed-status',role:'status','aria-live':'polite'},'Loading ' + LABEL[feed] + '…');
+    root.append(status,app.button('Show all papers',() => app.showAllPapers()));
+    const current = () => epoch === app.viewEpoch && app.mounted && this.active === feed;
+    try {
+      const population = feed === 'saved' ? null : await this.getPopulation(refresh, info => {
+        if (current()) status.textContent = 'Retrieving the complete Recent population… ' + (info?.papers?.length || info?.received || '') ;
+      },generation,current);
+      if (!current() || generation !== await app.store.generation()) return;
+      const observations = ['trending','rising'].includes(feed) ? await app.store.readership() : [];
+      if (!current() || generation !== await app.store.generation()) return;
+      const result = buildFeed(feed,population,app.state,{model:app.model,observations,seed:this.seed});
+      if (['trending','rising'].includes(feed) && this.cacheInfo?.stale) {
+        result.available = false; result.entries = [];
+        result.reasons = [...(result.reasons || []),'The cached population is stale. Refresh the complete Recent listing before establishing a current popularity ranking.'];
+      }
+      // Keep known richer metadata when Recent omits the abstract for the same
+      // paper title. The feed's source dates and identifiers remain authoritative.
+      for (const p of result.papers) {
+        const old = app.state.papers[p.id];
+        if (feed === 'saved') this.liveMetadata.set(p.id,old);
+        app.state.papers[p.id] = feed === 'saved' ? p : mergePaperMetadata(old,p);
+      }
+      this.result = result;
+      this.render(root,result);
+    } catch (error) {
+      if (!current()) return;
+      status.textContent = 'Unable to load ' + LABEL[feed] + ': ' + error.message;
+      root.append(app.button('Try again',() => this.open(feed,{refresh:true})),
+        link('Open the official Recent listing','https://arxiv.org/list/math/recent'));
+    }
+  }
+
+  appendMissing(entries) {
+    const app = this.app, missing = entries.filter(e => !app.paperNodes.has(e.paperId));
+    if (!missing.length) return;
+    const container = element('dl',{'data-arxiv-discovery':'true',class:'ad-fetched-papers'});
+    let date = null;
+    for (const entry of missing) {
+      const p = app.state.papers[entry.paperId]; if (!p) continue;
+      if (date !== p.announcementDate) {
+        date = p.announcementDate;
+        container.append(element('h3',{},date || 'Saved papers without an announcement date'));
+      }
+      const dt = element('dt',{},link('arXiv:' + p.versionedId,p.links.abstract),' [',link('pdf',p.links.pdf),p.links.html ? [', ',link('html',p.links.html)] : null,']');
+      const dd = element('dd',{},element('div',{class:'meta'},
+        element('div',{class:'list-title mathjax'},element('span',{class:'descriptor'},'Title: '),richText(p,'title')),
+        element('div',{class:'list-authors'},element('span',{class:'descriptor'},'Authors: '),p.authors.map((a,i) => [i ? ', ' : '',a.url ? link(a.name,a.url) : a.name])),
+        element('div',{class:'list-subjects'},element('span',{class:'descriptor'},'Subjects: '),p.categories.join('; ')),
+        p.comments ? element('div',{class:'list-comments'},element('span',{class:'descriptor'},'Comments: '),richText(p,'comments')) : null,
+        p.journalRef ? element('div',{class:'list-journal-ref'},element('span',{class:'descriptor'},'Journal reference: '),richText(p,'journalRef')) : null,
+        p.abstract ? element('p',{class:'mathjax'},richText(p,'abstract')) : null));
+      container.append(dt,dd); app.paperNodes.set(p.id,{dt,dd}); this.addedIds.add(p.id);
+    }
+    const target = document.querySelector('#dlpage');
+    target.append(container); this.added.push(container);
+    for (const id of this.addedIds) if (!app.paperTools.has(id)) app.addPaperTools(id,app.paperNodes.get(id).dd);
+  }
+
+  render(root,result) {
+    const app = this.app, feed = result.feed;
+    for (const node of [...root.children]) if (node.tagName !== 'STYLE') node.remove();
+    for (const tools of app.paperTools.values()) for (const note of tools.root.querySelectorAll('.feed-note')) note.remove();
+    if (feed === 'saved') {
+      // Saved may refer to a different version from the native page. Keep its
+      // original metadata in a removable row instead of attaching old-version
+      // controls to a newly announced paper's native title and abstract.
+      app.nativeListing.apply([]);
+      for (const entry of result.entries) {
+        const id = entry.paperId, nodes = app.paperNodes.get(id);
+        if (!nodes || this.addedIds.has(id)) continue;
+        this.replacedNative.set(id,nodes);
+        const tools = app.paperTools.get(id);
+        if (tools) {app.removeHost(tools.host);app.paperTools.delete(id);}
+        app.paperNodes.delete(id);
+      }
+    }
+    this.appendMissing(result.entries);
+    app.nativeListing.apply(result.entries.map(entry => entry.paperId));
+    app.listView = 'feed';
+    const count = `${result.entries.length} displayed${result.truncated ? ' of ' + result.filteredCount + ' matches' : ''}`;
+    root.append(element('p',{class:'listing-summary feed-status',role:'status'},`${LABEL[feed]} · ${count} · ${result.label || ''}`),
+      element('div',{class:'row'},app.button('Choose feed',() => this.openMenu()),app.button('Feed settings',() => this.openSettings()),
+        app.button('Refresh feed',() => this.open(feed,{refresh:feed !== 'saved'})),
+        ['random','discovery','for-you'].includes(feed) ? app.button('New draw',() => this.open(feed,{regenerate:true})) : null,
+        app.button('Show all papers',() => app.showAllPapers())));
+    if (feed !== 'saved' && this.population) {
+      root.append(element('p',{class:'muted'},`${this.population.papers.length} distinct papers in the complete Recent source · ${(this.population.announcementDates || []).join(', ')}. Source retrieved ${instant(this.cacheInfo.savedAt)}.`));
+      if (this.cacheInfo?.offline) root.append(element('p',{class:'notice'},'Offline cached snapshot. Current source membership has not been reverified. ' + this.cacheInfo.error));
+    }
+    if (result.unknownSections) root.append(element('p',{class:'muted'},'The source does not label submission type for ' + result.unknownSections + ' papers. Unknown types remain eligible unless explicitly filtered.'));
+    if (result.coverage) {
+      const c = result.coverage;
+      root.append(element('p',{class:'readership-coverage'},`Readership statistics available for ${c.measured} of ${c.total} recent papers; ${c.positive} have positive activity. Coverage is evaluated before display filters.`));
+      const rows = Object.entries(c.outcomes || {}).filter(([,n]) => n);
+      root.append(element('details',{},element('summary',{},'Coverage and availability'),element('ul',{},rows.map(([name,n]) => element('li',{},`${name.replaceAll('_',' ')}: ${n}`))),
+        element('p',{},'A retrieval timestamp states when the observation was collected. Provider update time and underlying metric freshness may remain unknown.')));
+    }
+    if (!result.available) root.append(element('p',{class:'notice'},feed === 'trending' ? 'Insufficient readership data to establish a meaningful trending ranking.' : feed === 'rising' ? 'Insufficient comparable historical data to establish a meaningful rising ranking.' : 'No qualifying highlight candidates are available.'),
+      element('ul',{},(result.reasons || []).map(reason => element('li',{},reason))));
+    else if (!result.entries.length) root.append(element('p',{class:'notice'},'No papers match these feed filters.'));
+    if (feed === 'highlights') root.append(element('p',{class:'notice'},'These are AI assessments grounded in paper passages. Claims and significance have not been independently verified. No automatic bulk AI analysis runs.'),
+      app.button('Assess selected Recent papers',() => this.openHighlights()));
+    if (feed === 'saved') root.append(app.button('Export bookmarks (BibTeX)',() => downloadText('arxiv-bookmarks.bib',bookmarksBibtex(app.state),'application/x-bibtex')));
+    if (result.entries.length) {
+      root.append(element('p',{class:'muted'},'Native arXiv rows keep their original order. The feed index and Alt+J / Alt+K follow feed order.'),
+        element('details',{class:'feed-index'},element('summary',{},'Feed order'),element('ol',{},result.entries.map((entry,index) => element('li',{},
+          app.button(`${entry.rank ? 'Rank ' + entry.rank + ' · ' : ''}${entry.paperId}`,() => app.focusPaper(entry.paperId)),
+          index === 0 && result.truncated ? ' (display limit applies)' : null)))));
+    }
+    for (const [index,entry] of result.entries.entries()) {
+      const tools = app.paperTools.get(entry.paperId); if (!tools) continue;
+      const paper = app.state.papers[entry.paperId], settings = app.state.settings.feeds;
+      const note = element('div',{class:'feed-note selection-note'},`${LABEL[feed]} · ${entry.rank ? 'Rank ' + entry.rank : 'Position ' + (index+1)} · ${app.state.reading[entry.paperId] ? 'Read' : 'Unread'} · ${paper.announcementDate || 'Unknown announcement date'}`);
+      if (entry.observation) {
+        const o = entry.observation, definition = METRIC_DEFINITIONS[o.provider + ':' + o.metric];
+        if (settings.showRaw) note.append(element('p',{},`${o.value} ${definition?.label || o.metric}`));
+        if (settings.showGrowth && Number.isFinite(entry.velocity)) note.append(element('p',{},`${entry.velocity.toFixed(3)} ${definition?.kind || 'observations'} / hour over ${entry.intervalHours.toFixed(2)} hours`));
+        note.append(element('details',{},element('summary',{},feed === 'rising' ? 'Why is this rising?' : 'Why is this trending?'),
+          element('p',{},`Provider: ${o.provider}. Metric: ${o.metric}. Value: ${o.value}. Measurement window: ${o.window.kind}${o.window.days ? ' (' + o.window.days + ' days)' : ''}.`),
+          element('p',{},`Observed ${o.observedAt}. Provider updated: ${o.providerUpdatedAt || 'unknown'}. Availability: ${o.status}.`),
+          element('p',{},definition?.limitation || ''),
+          element('p',{},'Ranks use this metric alone. Equal values share a rank; arXiv IDs resolve display ties. Older papers can accumulate more activity; this is not an age-adjusted growth claim.'),
+          o.sourceUrl ? link('Provider record',o.sourceUrl) : null));
+      } else if (entry.assessment) {
+        note.append(element('details',{},element('summary',{},'AI assessment and evidence'),element('p',{class:'answer'},mathFragment(document,entry.assessment.text,{recoverBareTex:true})),
+          element('p',{},mathFragment(document,entry.assessment.highlight.reason,{recoverBareTex:true})),element('p',{},'Assessment basis: ' + entry.assessment.highlight.basis.join(', ')),
+          link('Source (' + entry.assessment.source.kind + ')',entry.assessment.source.url),
+          element('ul',{},(entry.assessment.highlight.citations || []).map(c => element('li',{},link(c.label,c.url),c.quotes.length ? ' — ' + c.quotes.join(' / ') : ''))),
+          element('p',{class:'muted'},'AI assessment · author claims unverified · ' + entry.assessment.assessedAt)));
+      } else note.append(element('details',{},element('summary',{},'Why this paper?'),element('p',{},entry.reason || result.label)));
+      tools.root.insertBefore(note,tools.body);
+    }
+  }
+
+  refreshProtection() {
+    if (this.active !== 'highlights' || !this.population || !this.app.listRoot) return;
+    this.result = buildFeed('highlights',this.population,this.app.state,{model:this.app.model});
+    this.render(this.app.listRoot,this.result);
+  }
+
+  openSettings() {
+    const app = this.app, body = app.panel('Feed settings','feed-settings'), s = app.state.settings.feeds;
+    const landing = select(FEEDS,s.landing), categories = select(Object.entries(CATEGORIES).map(([id,name]) => [id,id + ' — ' + name]),'');
+    categories.multiple = true; categories.size = 6;
+    for (const option of categories.options) option.selected = s.categories.includes(option.value);
+    const number = (value,min,max,step = 1) => element('input',{type:'number',value,min,max,step});
+    const maximum = number(s.maxDisplayed,0,10000), refresh = number(s.refreshMinutes,15,10080);
+    const coverage = number(Math.round(s.minimumCoverage*100),25,100), age = number(s.maxMetricAgeHours,1,168);
+    const randomCount = number(s.randomCount,1,200), intensity = number(Math.round(s.discoveryIntensity*100),0,100);
+    const author = element('input',{type:'text',maxlength:500,value:s.author}), date = element('input',{type:'date',value:s.date}), search = element('input',{type:'search',maxlength:500,value:s.search});
+    const reading = select([['all','All'],['unread','Unread'],['read','Read']],s.reading), bookmark = select([['all','All'],['saved','Bookmarked'],['unsaved','Not bookmarked']],s.bookmark);
+    const section = select([['all','All'],['new','New'],['cross','Cross-submissions'],['replacement','Replacements'],['unknown','Unknown']],s.section);
+    const sort = select([['saved','Bookmark date'],['date','Announcement date'],['title','Title']],s.savedSort);
+    const metrics = select([['none','No provider selected'],...Object.entries(METRIC_DEFINITIONS).map(([id,d]) => [id,d.label])],s.provider === 'none' ? 'none' : s.provider + ':' + s.metric);
+    const toggles = {};
+    const toggle = (key,label) => { const node = checkbox(label,s[key]); toggles[key] = node.querySelector('input'); return node; };
+    body.append(field('Default landing feed',landing),field('Mathematical categories',categories,'Select multiple categories. No selection includes all 32.'),
+      element('div',{class:'columns'},field('Search titles, abstracts and authors',search),field('Author contains',author),field('Announcement date within source',date),field('Reading status',reading),field('Bookmark status',bookmark),field('Submission type',section)),
+      toggle('includeCross','Include known cross-submissions'),toggle('includeReplacements','Include known replacements'),
+      element('div',{class:'columns'},field('Maximum displayed papers',maximum,'0 displays every matching paper. This does not change source eligibility or daily quotas.'),field('Source refresh interval (minutes)',refresh,'Cache lifetime on feed visits. Nothing runs while the browser is closed.')),
+      element('h3',{},'Observed attention'),field('Provider and metric',metrics),
+      element('div',{class:'columns'},field('Minimum Recent metric coverage (%)',coverage),field('Maximum observation age (hours)',age)),
+      toggle('showRaw','Display raw measurements'),toggle('showGrowth','Display growth when valid'),
+      element('p',{class:'muted'},'Coverage and ranks use the full Recent population. Category, date, author, read and bookmark controls filter results afterward. Personal interests never alter Trending or Rising ranks.'),
+      element('h3',{},'Exploration'),toggle('randomBalanced','Use adaptive category quotas in the Recent Random feed'),
+      field('Global Random sample size',randomCount,'Used only when category quotas are disabled.'),field('Discovery novelty strength (%)',intensity),field('Saved sort order',sort));
+    const batch = number(s.highlightBatch,1,10); body.append(field('Maximum papers per explicit AI assessment batch',batch,'AI also obeys the existing provider consent, request allowance and spending limits.'));
+    body.append(app.button('Save feed settings',async () => {
+      const metricKey = metrics.value, separator = metricKey.indexOf(':');
+      const patch = {landing:landing.value,categories:[...categories.selectedOptions].map(o => o.value),maxDisplayed:Number(maximum.value),refreshMinutes:Number(refresh.value),
+        minimumCoverage:Number(coverage.value)/100,maxMetricAgeHours:Number(age.value),provider:metricKey === 'none' ? 'none' : metricKey.slice(0,separator),metric:metricKey === 'none' ? '' : metricKey.slice(separator+1),
+        randomCount:Number(randomCount.value),discoveryIntensity:Number(intensity.value)/100,author:author.value,date:date.value,search:search.value,reading:reading.value,bookmark:bookmark.value,section:section.value,savedSort:sort.value,highlightBatch:Number(batch.value)};
+      for (const [key,input] of Object.entries(toggles)) patch[key] = input.checked;
+      app.state.settings = await app.store.settings({feeds:patch});
+      const feed = this.active; if (feed) await this.open(feed); else app.notify('Feed settings saved.');
+    }));
+    body.append(element('h3',{},'External observation files'),element('p',{class:'muted'},'Import the reproducible collector’s JSON observations. Provider credentials stay outside the userscript. History is limited to 30 days and 50,000 observations; personal-data exports omit it.'));
+    const input = element('input',{type:'file',accept:'.json,application/json'});
+    body.append(field('Readership observation JSON',input),app.button('Import observations',async () => {
+      const file = input.files?.[0]; if (!file) throw new Error('Choose an observation file.');
+      if (file.size > 50000000) throw new Error('The observation file exceeds 50 MB.');
+      const observations = await app.store.importReadership(JSON.parse(await file.text()));
+      app.notify(observations.length + ' retained external observations. Choose the matching provider and metric, then save these settings.');
+    }),app.button('Export external observations',async () => downloadText('arxiv-readership-observations.json',JSON.stringify({schemaVersion:1,observations:await app.store.readership()},null,2),'application/json')),
+    app.button('Clear external observations',async () => { if (!confirm('Clear the imported readership observation history? Personal interests and saved papers will remain.')) return; await app.store.clearReadership(); app.notify('External observations cleared.'); }));
+  }
+
+  openHighlights() {
+    const app = this.app, body = app.panel('Assess potential highlights','highlight-assessment');
+    if (!this.population?.complete) { body.append(element('p',{},'Open a complete Recent feed first.')); return; }
+    const candidates = this.population.papers, choices = select(candidates.map(p => [p.id,p.id + ' — ' + p.title]),'');
+    choices.multiple = true; choices.size = 8;
+    for (const option of choices.options) option.selected = false;
+    body.append(element('p',{class:'notice'},'Choose papers explicitly. AI assessments can discuss author-claimed results only when the paper’s No Spoilers setting permits it. The existing bridge validates source evidence; no assessment is independent verification.'),field('Recent papers to assess',choices));
+    const inconclusive = candidates.filter(p => {
+      const h = app.state.highlights[p.id];
+      return h?.highlight?.status === 'not_established' && h.version === p.version &&
+        (!app.noSpoilers(p) || h.noSpoilers) && (p.version || h.announcementDate === p.announcementDate && Date.now()-Date.parse(h.assessedAt) >= 0 && Date.now()-Date.parse(h.assessedAt) < 3600000);
+    });
+    if (inconclusive.length) body.append(element('details',{},element('summary',{},`${inconclusive.length} inconclusive assessment(s)`),element('ul',{},inconclusive.map(p => element('li',{},link(p.title,p.links.abstract),' — ',mathFragment(document,app.state.highlights[p.id].highlight.reason,{recoverBareTex:true}))))));
+    body.append(app.button('Assess selected papers',async () => {
+      const ids = [...choices.selectedOptions].map(o => o.value), maximum = app.state.settings.feeds.highlightBatch;
+      if (!ids.length || ids.length > maximum) throw new Error('Select between 1 and ' + maximum + ' papers.');
+      const dialog = app.dialog, epoch = app.viewEpoch;
+      const current = () => dialog?.isConnected && dialog.open && app.currentPanel === 'highlight-assessment' && app.viewEpoch === epoch;
+      const generation = await app.store.generation();
+      for (const id of ids) {
+        if (!current() || generation !== await app.store.generation()) return;
+        const paper = candidates.find(p => p.id === id), noSpoilers = app.noSpoilers(paper);
+        app.notify('Assessing ' + id + '…');
+        const answer = await app.ai.highlight(paper,{noSpoilers});
+        if (!current() || generation !== await app.store.generation()) return;
+        if (app.noSpoilers(paper) !== noSpoilers) throw new Error('Spoiler protection changed during generation. Request a new assessment under the current setting.');
+        const assessment = {paperId:id,version:paper.version,announcementDate:paper.announcementDate,text:answer.text,source:answer.source,highlight:answer.highlight,assessedAt:instant(Date.now()),noSpoilers,assessmentKind:'unverified_ai_assessment'};
+        if (!await app.store.setIfGeneration('highlights',id,assessment,generation)) throw new Error('Saved data changed; the assessment was not retained.');
+        app.state.highlights[id] = assessment;
+      }
+      if (current()) await this.open('highlights');
+    }));
+  }
+}
+
+return {FeedController};
+},
+"src/feeds.js": (__require) => {
+const {FEEDS, checkedFeedSettings} = __require("src/feed-settings.js");
+const {generateRecentSelection} = __require("src/sampling.js");
+const {predict, subscriptionMatches, paperCategories} = __require("src/recommender.js");
+const {rankTrending, rankRising} = __require("src/readership.js");
+
+
+
+function filterFeedEntries(entries, papers, state, settings) {
+  const byId = new Map(papers.map(p => [p.id,p]));
+  const s = checkedFeedSettings(settings);
+  const query = s.search.toLocaleLowerCase(), author = s.author.toLocaleLowerCase();
+  return entries.filter(entry => {
+    const p = byId.get(entry.paperId); if (!p) return false;
+    if (s.categories.length && !paperCategories(p).some(c => s.categories.includes(c))) return false;
+    if (!s.includeCross && p.section === 'cross' || !s.includeReplacements && p.section === 'replacement') return false;
+    if (s.section !== 'all' && (p.section || 'unknown') !== s.section) return false;
+    if (s.date && p.announcementDate !== s.date) return false;
+    if (author && !p.authors.some(a => a.name.toLocaleLowerCase().includes(author))) return false;
+    if (query && ![p.id,p.title,p.abstract,...p.authors.map(a => a.name)].join(' ').toLocaleLowerCase().includes(query)) return false;
+    const read = !!state.reading?.[p.id], saved = !!state.bookmarks?.[p.id];
+    return !(s.reading === 'read' && !read || s.reading === 'unread' && read ||
+      s.bookmark === 'saved' && !saved || s.bookmark === 'unsaved' && saved);
+  });
+}
+
+// Public popularity calculation never receives the interest model or histories.
+// Local filters run AFTER its quality assessment and ranks have been fixed.
+function buildFeed(feed, population, state, {model, observations = [], seed = 'recent', now = Date.now()} = {}) {
+  if (!FEEDS.some(([id]) => id === feed) || feed === 'today') throw new Error('Choose a supported Recent or Saved feed.');
+  const settings = checkedFeedSettings(state.settings?.feeds);
+  let papers, result;
+  if (feed === 'saved') {
+    papers = Object.keys(state.bookmarks || {}).map(id => state.savedPapers?.[id] || state.papers?.[id]).filter(Boolean);
+    papers.sort((a,b) => settings.savedSort === 'title' ? a.title.localeCompare(b.title) || a.id.localeCompare(b.id) :
+      settings.savedSort === 'date' ? String(b.announcementDate || '').localeCompare(a.announcementDate || '') || a.id.localeCompare(b.id) :
+        String(state.bookmarks[b.id]).localeCompare(state.bookmarks[a.id]) || a.id.localeCompare(b.id));
+    result = {available:true, entries:papers.map(p => ({paperId:p.id,reason:'Saved locally; retained independently of Recent.'})), reasons:[], label:'Saved papers'};
+  } else {
+    if (population?.population !== 'recent' || population.complete !== true) return {available:false, entries:[], papers:[], reasons:['The complete authoritative arXiv Recent listing has not been verified.'],label:feed};
+    papers = population.papers;
+    const sample = mode => generateRecentSelection(population, {
+      mode, seed, model:mode === 'random' ? null : model,
+      settings:{...state.settings, includeCross:settings.includeCross, includeReplacements:settings.includeReplacements},
+      subscriptions:mode === 'random' ? [] : state.subscriptions,
+      reading:mode === 'discovery' ? state.reading : {}, knownPapers:mode === 'discovery' ? state.papers : {},
+      discoveryIntensity:settings.discoveryIntensity
+    });
+    if (feed === 'trending' || feed === 'rising') {
+      const options = {provider:settings.provider,metric:settings.metric,now,
+        minCoverage:settings.minimumCoverage,maxAgeHours:settings.maxMetricAgeHours};
+      result = (feed === 'trending' ? rankTrending : rankRising)(population,observations,options);
+    } else if (feed === 'for-you') {
+      if (model?.sampleCount) {
+        const entries = papers.map(p => ({paperId:p.id,score:predict(model,p),reason:'Ranked by the existing local interest model. This is personal relevance, not readership.'}))
+          .sort((a,b) => b.score - a.score || a.paperId.localeCompare(b.paperId));
+        result = {available:true,entries,reasons:[],label:'Personal relevance'};
+      } else result = {available:true,...sample('random'),reasons:[],label:'Balanced random fallback — no usable interest feedback yet'};
+    } else if (feed === 'discovery') {
+      result = {available:true,...sample('discovery'),reasons:[],label:'Unfamiliar topics, categories and author labels'};
+    } else if (feed === 'random') {
+      let draw;
+      if (settings.randomBalanced) draw = sample('random');
+      else {
+        draw = generateRecentSelection(population,{mode:'personalized',seed,
+          settings:{includeCross:settings.includeCross,includeReplacements:settings.includeReplacements,personalizedCount:settings.randomCount,useSubscriptions:false},
+          model:null,subscriptions:[]});
+        draw.mode = 'random';
+        for (const entry of draw.entries) entry.reason = 'Uniform global sampling without replacement; independent of interests, authors and readership.';
+      }
+      result = {available:true,...draw,reasons:[],label:settings.randomBalanced ? 'Random with adaptive category quotas' : 'Uniform global random sample'};
+    } else if (feed === 'subscriptions') {
+      result = {available:true,entries:papers.filter(p => p.authors.some(a => (state.subscriptions || []).some(s => subscriptionMatches(a,s))))
+        .map(p => ({paperId:p.id,reason:'Matches a stable author identity or an explicitly confirmed name-only subscription.'})),reasons:[],label:'Followed researchers'};
+    } else if (feed === 'highlights') {
+      const entries = papers.filter(p => {
+        const h = state.highlights?.[p.id];
+        const protectedPaper = state.settings.paperSpoilers?.[p.id] ?? state.settings.noSpoilers;
+        return h && h.highlight?.status === 'candidate' && h.version === p.version && (!protectedPaper || h.noSpoilers) &&
+          (p.version || h.announcementDate === p.announcementDate && now-Date.parse(h.assessedAt) >= 0 && now-Date.parse(h.assessedAt) < 3600000);
+      }).map(p => ({paperId:p.id,assessment:state.highlights[p.id],reason:'On-demand AI assessment grounded in the cited source. Author claims and significance remain unverified.'}));
+      result = {available:entries.length > 0,entries,reasons:entries.length ? [] : ['No source-backed AI candidates are available under the current version and spoiler settings. Inconclusive assessments are kept separately.'],label:'Potential highlights — unverified AI assessments'};
+    } else result = {available:true,entries:papers.map(p => ({paperId:p.id,reason:'Original arXiv Recent order.'})),reasons:[],label:'Complete chronological Recent listing'};
+  }
+  const rankedCount = result.entries?.length || 0;
+  const filtered = filterFeedEntries(result.entries || [],papers,state,settings);
+  const entries = settings.maxDisplayed ? filtered.slice(0,settings.maxDisplayed) : filtered;
+  return {...result,feed,papers,entries,rankedCount,filteredCount:filtered.length,displayedCount:entries.length,
+    truncated:entries.length < filtered.length,unknownSections:papers.filter(p => p.section == null).length};
+}
+
+return {filterFeedEntries,buildFeed,FEEDS};
 }
 };
 const __cache = Object.create(null);

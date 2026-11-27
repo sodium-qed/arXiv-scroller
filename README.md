@@ -2,6 +2,14 @@
 
 Read the usual arXiv listing with a row of actions beneath each abstract. You can rate a paper, bookmark it, mark it as read or request an AI overview directly from that row. Author follow controls appear just below it. Open **Settings** at the upper right to turn paper tools on or off and choose a recommendation mode.
 
+## Feed expansion — development branch
+
+Version 1.3.0 on `feature/trending` adds **Feeds** beside Settings: Today, Trending, Rising, For You, Discovery, Subscriptions, Highlights, Random, Recent and Saved. Today retains the existing adaptive daily sampler. Other research feeds use the complete official Recent population, including every pagination page. Saved keeps bookmarks from any date. Original arXiv rows retain their order; the feed index and keyboard navigation follow the chosen ranking. [Feed guide](docs/FEEDS.md)
+
+[Install the feature/trending build](https://raw.githubusercontent.com/sodium-qed/arXiv-scroller/feature/trending/dist/arxiv-discovery.user.js). This is a branch build, not a published release. Updating the existing userscript retains its storage identity and private data. Tampermonkey may request permission for `arxiv.org` so the selected feed can retrieve missing listing pages; the optional AI bridge remains on numeric loopback. The ordinary installation link below still follows the stable `main` branch.
+
+**Readership investigation:** the live full-population OpenAIRE experiment matched 6 of 2,555 Recent papers and 179 of 701 Today papers on 26 November 2026. It returned no `views` or `downloads` values for either population. Missing measurements were not converted to zero. Consequently, no provider is automatically selected and Trending reports insufficient data until imported observations pass its quality gates. Rising requires a documented cumulative counter and comparable history; none of the investigated counters qualifies. [Results and reproduction](docs/research/experiment-running.md) · [Provider comparison](docs/research/provider-comparison.md)
+
 ## Install in Chrome
 
 1. Install **Tampermonkey** for Chrome. On Chrome 138 or later, open **Extensions → Manage Extensions → Tampermonkey → Details** and turn on **Allow User Scripts**. Tampermonkey documents the setting for older Chrome versions as well. [Get Tampermonkey](https://www.tampermonkey.net/) · [Userscript permission instructions](https://www.tampermonkey.net/faq.php?q=Q209)
@@ -56,6 +64,7 @@ The build uses Node.js 20 or later and its standard library. No package installa
 npm run build
 npm test
 python -m unittest discover -s tests -p 'test_bridge.py'
+node scripts/replay-readership-experiment.mjs
 ~~~
 
 The build writes `dist/arxiv-discovery.user.js`. The regression input is a lossless gzip copy of the supplied listing. Its manifest records the expected date, counts, size and uncompressed SHA-256. The optional Chromium suites exercise the parser and the built application with fixture responses. [Fixture manifest](fixtures/fixture-metadata.json) · [Test commands and verification scope](docs/TESTING.md)
@@ -70,5 +79,8 @@ The build writes `dist/arxiv-discovery.user.js`. The regression input is a lossl
 - [AI provider and bridge configuration](docs/AI.md)
 - [Requirements and acceptance coverage](docs/REQUIREMENTS.md)
 - [Known limitations](docs/LIMITATIONS.md)
+- [Feeds, settings and observation import](docs/FEEDS.md)
+- [Provider investigation and complete-population measurements](docs/research/trending-data-sources.md)
+- [Reproducible Trending and Rising methodology](docs/research/trending-methodology.md)
 
 Independent project. Thank you to arXiv for use of its open access interoperability.

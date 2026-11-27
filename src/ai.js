@@ -7,6 +7,8 @@ const ID_PATTERN = /^(?:\d{4}\.\d{4,5}|[a-z][a-z.-]*\/\d{7})$/i;
 const MODEL_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/;
 const LEVELS = new Set(['unfamiliar', 'introduced', 'developing', 'comfortable', 'proficient', 'advanced']);
 const MAX_UNKNOWN_VERSION_AGE = 60 * 60 * 1000;
+const HIGHLIGHT_BASES = new Set(['open_problem', 'bound', 'method', 'connection', 'generalization', 'computation']);
+const PROTECTED_HIGHLIGHT_REASON = 'No Spoilers is active. A highlight assessment has not been established because assessing new results could reveal protected material.';
 const DETAIL_VALUES = new Map([
   ['standard', 'standard'], ['simple', 'simpler'], ['simpler', 'simpler'],
   ['rigorous', 'rigorous'], ['more rigorous', 'rigorous']
@@ -76,7 +78,30 @@ function safeSourceUrl(value, kind, paper, allowFragment) {
   }
 }
 
-function checkResult(data, paper) {
+function checkHighlight(value, source, paper, noSpoilers) {
+  const invalid = () => { throw new Error('The bridge returned an invalid or ungrounded highlight decision.'); };
+  if (!value || !['candidate', 'not_established'].includes(value.status) || !Array.isArray(value.basis) ||
+      value.basis.length > HIGHLIGHT_BASES.size || value.basis.some(b => !HIGHLIGHT_BASES.has(b)) ||
+      new Set(value.basis).size !== value.basis.length || !Array.isArray(value.citations) || value.citations.length > 8) invalid();
+  const reason = boundedText(value.reason, 2000, 'The highlight assessment reason');
+  if (!reason) invalid();
+  const citations = value.citations.map(item => {
+    const url = safeSourceUrl(item?.url, source.kind, paper, true);
+    if (!url || typeof item.label !== 'string' || !item.label || item.label.length > 260 ||
+        !Array.isArray(item.quotes) || !item.quotes.length || item.quotes.length > 8 ||
+        item.quotes.some(q => typeof q !== 'string' || q.length < 8 || q.length > 320)) invalid();
+    // Decision evidence must also be part of the bridge's verified source set.
+    const verified = source.citations.find(c => c.url === url && c.label === item.label);
+    if (!verified || item.quotes.some(q => !verified.quotes.includes(q))) invalid();
+    return {label:item.label, url, quotes:[...item.quotes]};
+  });
+  if (value.status === 'candidate') {
+    if (noSpoilers || !value.basis.length || !citations.length) invalid();
+  } else if (value.basis.length || citations.length) invalid();
+  return {status:value.status, basis:[...value.basis], reason:noSpoilers ? PROTECTED_HIGHLIGHT_REASON : reason, citations};
+}
+
+function checkResult(data, paper, {action, noSpoilers = false} = {}) {
   const text = boundedText(data?.text, 64000, 'The explanation');
   const source = data?.source;
   const url = safeSourceUrl(source?.url, source?.kind, paper, false);
@@ -90,6 +115,15 @@ function checkResult(data, paper) {
     }
   }
   const result = { text, source: { kind: source.kind, url, note: boundedText(source.note, 2200, 'The source note'), citations } };
+  if (action === 'highlight') {
+    result.highlight = checkHighlight(data.highlight, result.source, paper, noSpoilers);
+    if (noSpoilers) {
+      // Never display model prose or quotations for a protected highlight request.
+      result.text = PROTECTED_HIGHLIGHT_REASON;
+      result.source.note = 'No result assessment is displayed while No Spoilers is active.';
+      result.source.citations = [];
+    }
+  }
   if (data.usage && typeof data.usage === 'object') {
     result.usage = {};
     for (const key of ['inputTokens', 'outputTokens', 'estimatedCostUsd', 'dailyRequests', 'dailyCostUsd']) {
@@ -121,6 +155,10 @@ export class AIClient {
     return this.generate('overview', paper, '', options);
   }
 
+  async highlight(paper, options = {}) {
+    return this.generate('highlight', paper, '', {...options, profile:'full'});
+  }
+
   async explain(paper, term, options = {}) {
     const selection = boundedText(term, 500, 'The selected term');
     if (!selection) throw new Error('Select a word, expression, or short mathematical phrase.');
@@ -146,7 +184,7 @@ export class AIClient {
       throw new Error('A valid arXiv paper and version are required.');
     }
     const limits = requestLimits(ai);
-    const profile = provider === "local" ? (options.profile || (options.detail === "rigorous" || options.question ? "full" : ai.profile || "quick")) : "full";
+    const profile = action === 'highlight' ? 'full' : provider === "local" ? (options.profile || (options.detail === "rigorous" || options.question ? "full" : ai.profile || "quick")) : "full";
     if (!["quick", "full"].includes(profile)) throw new Error("Choose a supported AI reading profile.");
     if (profile === "quick") {
       limits.maxInputChars = Math.min(limits.maxInputChars, 4000);
@@ -182,7 +220,7 @@ export class AIClient {
       const age = Date.now() - saved?.savedAt;
       const cacheAgeLimit = !paper.version ? MAX_UNKNOWN_VERSION_AGE : saved?.source?.kind === 'abstract' ? 86400000 : Infinity;
       if (saved && age >= 0 && age < cacheAgeLimit) {
-        try { return { ...checkResult(saved, paper), cached: true }; } catch { /* Replace invalid imported cache entries. */ }
+        try { return { ...checkResult(saved, paper, {action, noSpoilers}), cached: true }; } catch { /* Replace invalid imported cache entries. */ }
       }
       if (!limits.dailyRequests || (provider !== 'local' && !limits.dailyBudget)) {
         throw new Error('The configured daily AI allowance is zero.');
@@ -234,7 +272,7 @@ export class AIClient {
       const cause = typeof data?.error === 'string' ? data.error.slice(0, 500) : 'Check the bridge configuration.';
       throw new Error('AI request failed (' + status + '). ' + cause);
     }
-    const result = checkResult(data, body.paper);
+    const result = checkResult(data, body.paper, {action:body.action, noSpoilers:body.noSpoilers});
     try {
       await this.cacheSet(key, { ...result, paperId: body.paper.id, version: body.paper.version, savedAt: Date.now() }, generation);
     } catch {

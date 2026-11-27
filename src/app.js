@@ -9,6 +9,8 @@ import {element,link,field,select,checkbox,STYLES} from './dom.js';
 import {feedbackCSV,readingCSV,bookmarksBibtex,downloadText} from './exports.js';
 import {gmRequest} from './transport.js';
 import {mathFragment} from './math.js';
+import {FeedController} from './feed-ui.js';
+import {mergePaperMetadata} from './schema.js';
 
 const MODES=[['random','Pure Random'],['balanced','Balanced Exploration'],['personalized','Personalized'],['discovery','Discovery'],['subscriptions','Subscriptions']];
 const LEVELS=['Unfamiliar','Introduced','Developing','Comfortable','Proficient','Advanced'];
@@ -22,6 +24,7 @@ export class DiscoveryApp {
     this.store=store;this.state=null;this.hosts=[];this.roots=[];this.cache=new PublicCache();this.currentPanel=null;
     this.listing=null;this.article=null;this.paperNodes=new Map();this.currentPaper=null;this.activeSelection=null;
     this.paperTools=new Map();this.inlineAI=new Map();this.mounted=false;this.viewEpoch=0;this.listView=null;
+    this.feeds=new FeedController(this);
     this.selectionHandler=e=>this.handleSelection(e);this.keyHandler=e=>this.handleKeys(e);
   }
   async initialize() {
@@ -34,9 +37,9 @@ export class DiscoveryApp {
     for(const paper of papers) {
       // Standalone metadata must not overwrite the known announcement cycle.
       const previous=this.state.papers[paper.id];
-      if(previous&&!paper.announcementDate) paper.announcementDate=previous.announcementDate;
-      if(previous&&!paper.section) paper.section=previous.section;
-      this.state.papers[paper.id]={...previous,...paper};
+      if(!this.listing&&previous&&!paper.announcementDate) paper.announcementDate=previous.announcementDate;
+      if(!this.listing&&previous&&!paper.section) paper.section=previous.section;
+      this.state.papers[paper.id]=mergePaperMetadata(previous,paper);
     }
     try{await this.store.cachePapers(papers.map(p=>this.state.papers[p.id]));}
     catch{this.state.storageWarnings=[...(this.state.storageWarnings||[]),'Some public paper metadata could not be cached. The original page is unchanged; saving an unusually large or malformed record may fail.'];}
@@ -46,7 +49,7 @@ export class DiscoveryApp {
       cacheSet:async(key,value,generation)=>{if(!await this.store.setIfGeneration('explanations',key,value,generation))throw new Error('Personal data changed during generation; the answer was not saved.');this.state.explanations[key]=value;}});
     this.store.subscribe(()=>this.refreshExternal());
     if(typeof GM_registerMenuCommand==='function') {
-      const commands=[['Show arXiv Discovery',()=>this.show()],['Daily selection',()=>this.openDaily()],
+      const commands=[['Show arXiv Discovery',()=>this.show()],['Research feeds',()=>this.feeds.openMenu()],['Daily selection',()=>this.openDaily()],
         ['Show all papers',()=>this.showAllPapers()],['Previous daily selections',()=>this.openPrevious()],
         ['Explore a category',()=>this.openCategory()],['Bookmarks and reading',()=>this.openBookmarks()],
         ['Followed researchers',()=>this.openAuthors()],['Interests and training history',()=>this.openInterests()],
@@ -61,7 +64,7 @@ export class DiscoveryApp {
         catch(error){this.notify(error.message||String(error));}
       });
     }
-    if(this.state.settings.mode!=='original') await this.mount();
+    if(this.state.settings.mode!=='original') {await this.mount();if(this.toolsEnabled())await this.feeds.resume();}
   }
   retrain() {
     this.model=trainModel(this.state.events,this.state.settings);
@@ -76,7 +79,16 @@ export class DiscoveryApp {
     for(const root of this.roots)for(const row of root.querySelectorAll('.actions[data-paper-id]')){const paper=this.state.papers[row.dataset.paperId];if(paper)row.replaceWith(this.paperActions(paper,row._entry));else row.remove();}
     this.refreshPaperSettings();
   }
-  async rememberPaper(paper) {await this.store.cachePapers([paper]);this.state.papers[paper.id]=paper;}
+  async rememberPaper(paper) {
+    // Saved can display a historical version. Status changes must not replace
+    // the canonical metadata used by the current native listing or other tabs.
+    const live=this.feeds.active==='saved'?this.feeds.liveMetadata.get(paper.id):null;
+    await this.store.cachePapers([live||paper]);this.state.papers[paper.id]=paper;
+  }
+  async bookmarkPaper(paper) {
+    const at=isoNow(),snapshot=await this.store.bookmarkPaper(paper,at);
+    this.state.bookmarks[paper.id]=at;this.state.savedPapers[paper.id]=snapshot;
+  }
   async refreshExternal() {
     this.closePanel();this.clearInlineAI();this.showAllPapers();await this.reload();
     if(this.state.settings.mode==='original')this.unmount();
@@ -112,7 +124,7 @@ export class DiscoveryApp {
     const launcher=this.rootHost('arxiv-discovery-settings',target,target.firstChild);
     this.settingsHost=launcher.host;
     this.settingsButton=element('button',{type:'button',class:'settings-launcher','aria-label':'Discovery settings','aria-haspopup':'dialog',onclick:event=>{if(event.isTrusted)this.openSettings();}},'Settings');
-    launcher.root.append(this.settingsButton);
+    launcher.root.append(this.button('Feeds',()=>this.feeds.openMenu(),{'aria-label':'Research feeds'}),' ',this.settingsButton);
   }
   async show() {
     if(this.state.settings.mode==='original'||!this.state.settings.showTools)this.state.settings=await this.store.settings({mode:this.state.settings.mode==='original'?this.state.settings.previousMode||'random':this.state.settings.mode,showTools:true});
@@ -221,12 +233,13 @@ export class DiscoveryApp {
       if(authors)tools.root.querySelector('.authors')?.replaceWith(this.authorControls(paper));
       if(spoilers)for(const input of tools.root.querySelectorAll('.paper-protection input'))input.checked=this.noSpoilers(paper);
     }
+    if(spoilers)this.feeds.refreshProtection();
   }
   removeHost(host) {if(!host)return;host.remove();this.hosts=this.hosts.filter(h=>h!==host);this.roots=this.roots.filter(r=>r.host!==host);}
   clearInlineAI() {for(const body of this.inlineAI.values())body.remove();this.inlineAI.clear();this.selectionBubble?.remove();this.selectionBubble=null;}
   moreTools() {
     const row=element('div',{class:'more-actions'});
-    const commands=[['Daily selection',()=>this.openDaily()],['Show all papers',()=>this.showAllPapers()],['Previous selections',()=>this.openPrevious()],['All papers in a category',()=>this.openCategory()],['Bookmarks',()=>this.openBookmarks()],['Authors',()=>this.openAuthors()],['Interests',()=>this.openInterests()],['Knowledge',()=>this.openKnowledge()],['Settings',()=>this.openSettings()],['Original arXiv',()=>this.hide()]];
+    const commands=[['Research feeds',()=>this.feeds.openMenu()],['Daily selection',()=>this.openDaily()],['Show all papers',()=>this.showAllPapers()],['Previous selections',()=>this.openPrevious()],['All papers in a category',()=>this.openCategory()],['Bookmarks',()=>this.openBookmarks()],['Authors',()=>this.openAuthors()],['Interests',()=>this.openInterests()],['Knowledge',()=>this.openKnowledge()],['Settings',()=>this.openSettings()],['Original arXiv',()=>this.hide()]];
     for(const [label,action] of commands)row.append(this.button(label,action));
     return element('details',{class:'more-tools'},element('summary',{},'More tools'),row);
   }
@@ -238,7 +251,7 @@ export class DiscoveryApp {
     const reason=select(REASONS.map(r=>[r,r||'Optional feedback reason']),latest?.reason||'');reason.className='feedback-reason';reason.setAttribute('aria-label','Feedback reason');
     const rate=async value=>{
       if(reason.value==='Insufficient mathematical background') value='background';
-      const e=await this.store.feedback(paper,value,reason.value,this.state.settings.mode,entry?.probability??null);
+      const e=await this.store.feedback(paper,value,reason.value,this.feeds.feedbackMode(),entry?.probability??null);
       this.state.events.push(e);this.retrain();this.refreshActionRows(paper);this.updateStatus();
       if(this.progress) this.updateProgress();
     };
@@ -247,8 +260,8 @@ export class DiscoveryApp {
       this.button('Need background',()=>rate('background'),{'aria-pressed':String(latest?.value==='background')}),
       this.button('Skip',()=>rate('neutral')),this.button('Clear feedback',()=>rate('removed')),reason,
       this.button(this.state.bookmarks[paper.id]?'Bookmarked':'Bookmark',async()=>{
-        if(this.state.bookmarks[paper.id]){await this.store.remove('bookmarks',paper.id);delete this.state.bookmarks[paper.id];}
-        else {await this.rememberPaper(paper);this.state.bookmarks[paper.id]=isoNow();await this.store.set('bookmarks',paper.id,this.state.bookmarks[paper.id]);}
+        if(this.state.bookmarks[paper.id]){await this.store.remove('bookmarks',paper.id);delete this.state.bookmarks[paper.id];delete this.state.savedPapers[paper.id];}
+        else await this.bookmarkPaper(paper);
         this.refreshActionRows(paper);
       },{'aria-pressed':String(!!this.state.bookmarks[paper.id])}),
       this.button(this.state.reading[paper.id]?'Read':'Mark as read',async()=>{
@@ -262,7 +275,7 @@ export class DiscoveryApp {
   }
   refreshActionRows(paper) {
     const row=this.paperTools.get(paper.id)?.root.querySelector('.actions[data-paper-id]');
-    if(row)row.replaceWith(this.paperActions(paper,row._entry));
+    if(row)row.replaceWith(this.paperActions(row._paper||paper,row._entry));
   }
   authorControls(paper) {
     const row=element('div',{class:'authors'},'Authors: ');
@@ -355,6 +368,7 @@ export class DiscoveryApp {
   }
   showAllPapers() {
     ++this.viewEpoch;this.nativeListing?.restore();this.activeSelection=null;this.activeSelectionKey=null;this.listView=null;this.progress=null;
+    this.feeds.clear();
     for(const {root} of this.paperTools.values())root.querySelector('.selection-note')?.remove();
     this.removeHost(this.listHost);this.listHost=null;this.listRoot=null;
     for(const root of this.roots)for(const row of root.querySelectorAll('.actions[data-paper-id]'))if(row._entry)row.replaceWith(this.paperActions(row._paper));
@@ -473,7 +487,7 @@ export class DiscoveryApp {
     body.append(element('div',{class:'row'},this.button('Export bookmarks (BibTeX)',()=>downloadText('arxiv-bookmarks.bib',bookmarksBibtex(this.state),'application/x-bibtex')),this.button('Export reading history (CSV)',()=>downloadText('arxiv-reading.csv',readingCSV(this.state),'text/csv'))));
     const ids=Object.keys(this.state.bookmarks).sort((a,b)=>this.state.bookmarks[b].localeCompare(this.state.bookmarks[a]));
     body.append(element('h3',{},`${ids.length} bookmarked papers`));if(!ids.length)body.append(element('p',{},'Use Bookmark on any paper to save it here.'));
-    this.pagedPapers(body,ids.map(id=>this.state.papers[id]).filter(Boolean));
+    this.pagedPapers(body,ids.map(id=>this.state.savedPapers[id]||this.state.papers[id]).filter(Boolean));
     const history=element('details',{},element('summary',{},`Reading history (${Object.keys(this.state.reading).length})`));
     history.append(element('ul',{},Object.entries(this.state.reading).sort((a,b)=>String(b[1]).localeCompare(String(a[1]))).map(([id,date])=>element('li',{},`${fmtDate(date)} · `,link(this.state.papers[id]?.title||id,`https://arxiv.org/abs/${id}`)))));body.append(history);
   }
@@ -482,7 +496,7 @@ export class DiscoveryApp {
     const draw=()=>{
       holder.replaceChildren(element('ul',{},papers.slice(page*40,(page+1)*40).map(p=>{
         const item=this.paperReference(p);
-        item.append(' ',this.button('Remove bookmark',async()=>{await this.store.remove('bookmarks',p.id);delete this.state.bookmarks[p.id];this.refreshActionRows(p);this.openBookmarks();}));return item;
+        item.append(' ',this.button('Remove bookmark',async()=>{await this.store.remove('bookmarks',p.id);delete this.state.bookmarks[p.id];delete this.state.savedPapers[p.id];this.refreshActionRows(p);this.openBookmarks();}));return item;
       })));
       if(papers.length>40)holder.append(element('div',{class:'row'},this.button('Previous page',()=>{page--;draw();},{disabled:page===0}),element('span',{},`Page ${page+1} / ${Math.ceil(papers.length/40)}`),this.button('Next page',()=>{page++;draw();},{disabled:(page+1)*40>=papers.length})));
     };draw();
@@ -582,7 +596,7 @@ export class DiscoveryApp {
       catch(error){input.checked=this.toolsEnabled();this.notify(error.message||String(error));}
       finally{pendingEnable=null;if(input.isConnected)input.removeAttribute('aria-busy');}
     });
-    body.append(enabled,field('Recommendation mode',this.modePicker()),daily);
+    body.append(enabled,field('Recommendation mode',this.modePicker()),daily,this.button('Research feeds',()=>this.feeds.openMenu()),this.button('Feed settings',()=>this.feeds.openSettings()));
     if(this.state.storageWarnings?.length)body.append(element('div',{class:'notice'},'Some saved records could not be loaded:',element('ul',{},this.state.storageWarnings.map(w=>element('li',{},w)))));
     body.append(element('h3',{},'Discovery'),checkbox('Include cross-submissions',s.includeCross,async e=>{this.showAllPapers();this.state.settings=await this.store.settings({includeCross:e.target.checked});}),
       checkbox('Include replacement submissions',s.includeReplacements,async e=>{this.showAllPapers();this.state.settings=await this.store.settings({includeReplacements:e.target.checked});}),
@@ -602,10 +616,10 @@ export class DiscoveryApp {
       const file=input.files?.[0];if(!file)throw new Error('Choose a JSON backup first.');if(file.size>50000000)throw new Error('The backup exceeds 50 MB.');
       const data=JSON.parse(await file.text());await this.store.import(data);this.showAllPapers();this.clearInlineAI();await this.reload();this.syncPaperTools();this.openSettings();this.notify('Backup imported. The AI bridge must be paired and enabled again.');
     }));
-    const groups=[['events','Feedback'],['bookmarks','Bookmarks'],['reading','Reading history'],['subscriptions','Author subscriptions'],['knowledge','Knowledge profile'],['glossary','Glossary'],['explanations','Cached AI explanations'],['selections','Saved daily selections']];
+    const groups=[['events','Feedback'],['bookmarks','Bookmarks'],['reading','Reading history'],['subscriptions','Author subscriptions'],['knowledge','Knowledge profile'],['glossary','Glossary'],['explanations','Cached AI explanations'],['highlights','AI highlight assessments'],['selections','Saved daily selections']];
     const category=select(groups,'events');body.append(field('Selective deletion',category),this.button('Delete selected data',async()=>{if(!confirm(`Permanently delete ${groups.find(g=>g[0]===category.value)[1].toLowerCase()}?`))return;await this.store.clearCollection(category.value);this.showAllPapers();this.clearInlineAI();await this.reload();this.openSettings();}),
       this.button('Delete all local data',async()=>{if(!confirm('Permanently delete all arXiv Discovery data, settings, pairing and cached explanations on this browser? Export a backup first if needed.'))return;await this.store.clearAll();await this.cache.clear();this.showAllPapers();this.clearInlineAI();await this.reload();this.syncPaperTools();this.openSettings();this.notify('All saved Discovery data has been deleted.');},{class:'danger'}),
-      element('p',{class:'version'},'arXiv Discovery 1.2.0 · Independent userscript · Thank you to arXiv for use of its open access interoperability.'),
+      element('p',{class:'version'},'arXiv Discovery 1.3.0 · Independent userscript · Thank you to arXiv for use of its open access interoperability.'),
       link('Source, documentation and issues','https://github.com/sodium-qed/arXiv-scroller'));
   }
   aiSettings(body) {
@@ -710,7 +724,7 @@ export class DiscoveryApp {
       const id=node.closest?.('[data-paper-id]')?.dataset.paperId;if(id&&this.state.papers[id])focusedPaper=this.state.papers[id];
       if(!focusedPaper)for(const [paperId,nodes] of this.paperNodes)if(nodes.dt.contains(node)||nodes.dd.contains(node)){focusedPaper=this.state.papers[paperId];break;}
     }
-    const papers=this.listing?this.nativeListing.visibleIds().map(id=>this.state.papers[id]).filter(Boolean):[this.article].filter(Boolean);if(!papers.length)return;
+    const papers=this.listing?this.feeds.visibleIds().map(id=>this.state.papers[id]).filter(Boolean):[this.article].filter(Boolean);if(!papers.length)return;
     if(focusedPaper&&!papers.some(p=>p.id===focusedPaper.id))focusedPaper=null;
     if(focusedPaper)this.currentPaper=focusedPaper;
     event.preventDefault();let index=papers.findIndex(p=>p.id===this.currentPaper?.id);
@@ -719,8 +733,8 @@ export class DiscoveryApp {
       this.focusPaper(paper.id);return;
     }
     const paper=focusedPaper||papers[Math.max(0,index)];this.currentPaper=paper;
-    const run=async()=>{if(key==='l'||key==='d'){const e=await this.store.feedback(paper,key==='l'?'like':'dislike','',this.state.settings.mode,this.selectionEntry(paper.id)?.probability??null);this.state.events.push(e);this.retrain();}
-      if(key==='b'){if(this.state.bookmarks[paper.id]){await this.store.remove('bookmarks',paper.id);delete this.state.bookmarks[paper.id];}else{await this.rememberPaper(paper);this.state.bookmarks[paper.id]=isoNow();await this.store.set('bookmarks',paper.id,this.state.bookmarks[paper.id]);}}
+    const run=async()=>{if(key==='l'||key==='d'){const e=await this.store.feedback(paper,key==='l'?'like':'dislike','',this.feeds.feedbackMode(),this.selectionEntry(paper.id)?.probability??null);this.state.events.push(e);this.retrain();}
+      if(key==='b'){if(this.state.bookmarks[paper.id]){await this.store.remove('bookmarks',paper.id);delete this.state.bookmarks[paper.id];delete this.state.savedPapers[paper.id];}else await this.bookmarkPaper(paper);}
       if(key==='r'){if(this.state.reading[paper.id]){await this.store.remove('reading',paper.id);delete this.state.reading[paper.id];}else{await this.rememberPaper(paper);this.state.reading[paper.id]=isoNow();await this.store.set('reading',paper.id,this.state.reading[paper.id]);}}this.refreshActionRows(paper);this.updateProgress();this.updateStatus();};run().catch(e=>this.notify(e.message));
   }
 }

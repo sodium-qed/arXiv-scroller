@@ -30,6 +30,9 @@ HTML = (f'<html><nav>Outside article</nav><article class="ltx_document"><h1>A fi
         '<section id="S2"><h2>Main results</h2><p>We prove an auxiliary identity for the sequence.</p>'
         '<div class="ltx_proof" id="S2.P"><h5>Proof</h5><p>The proof uses a construction.</p></div></section>'
         '<footer>Ignore footer</footer></article></html>').encode()
+HIGHLIGHT_CLAIM = ("We obtain a uniform approximation bound of n^-2 for twice continuously differentiable "
+                   "functions on the unit interval, improving the previously stated n^-1 bound under these hypotheses.")
+HIGHLIGHT_HTML = HTML.replace(b"We prove an auxiliary identity for the sequence.", HIGHLIGHT_CLAIM.encode())
 
 
 def request():
@@ -58,6 +61,18 @@ def completion(messages, *, bad_quotes=False):
                  "evidence": [{"ref": "made-up", "quote": "an unverified claim"}]}]
     return {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps({"sections": sections})}}],
             "usage": {"prompt_tokens": 58, "completion_tokens": 24}}
+
+
+def highlight_completion(messages, *, mutate=None):
+    sent = json.loads(messages[1]["content"])
+    passage = next(p for p in sent["passages"] if HIGHLIGHT_CLAIM in p["text"])
+    content = {"sections": [], "highlight": {"status": "candidate", "basis": ["bound"],
+        "reason": "The authors claim a stronger approximation bound under the stated differentiability hypothesis; this is an unverified assessment.",
+        "evidence": [{"ref": passage["ref"], "quote": HIGHLIGHT_CLAIM}]}}
+    if mutate:
+        mutate(content)
+    return {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(content)}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 90}}
 
 
 @contextmanager
@@ -248,6 +263,152 @@ class BridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(bridge.BridgeError, "verifiable source quotation"):
             app.handle(self.raw)
 
+    def test_highlight_decision_uses_full_profile_and_verified_exact_source_evidence(self):
+        captured = []
+        def provider(_, req, messages):
+            captured.append((req, messages))
+            return highlight_completion(messages)
+        app = bridge.Application(self.cfg, bridge.SourceRepository(lambda *_: HIGHLIGHT_HTML), provider)
+        result = app.handle({**self.raw, "action": "highlight", "profile": "quick"})
+        self.assertEqual(len(captured), 1)
+        req, messages = captured[0]
+        self.assertEqual(req["profile"], "full")
+        self.assertEqual(req["max_chars"], 8000)
+        self.assertIn("Ordinary topic description", messages[0]["content"])
+        self.assertIn("historical priority", messages[0]["content"])
+        self.assertIn("never place bare TeX commands", messages[0]["content"])
+        self.assertIn("each backslash as two backslashes", messages[0]["content"])
+        self.assertIn("Preserve exact source quotations unchanged", messages[0]["content"])
+        self.assertEqual(json.loads(messages[1]["content"])["task"], "highlight")
+        self.assertEqual(result["highlight"]["status"], "candidate")
+        self.assertEqual(result["highlight"]["basis"], ["bound"])
+        citation = result["highlight"]["citations"][0]
+        self.assertEqual(citation["url"], "https://arxiv.org/html/2401.12345v2#S2")
+        self.assertEqual(citation["quotes"], [HIGHLIGHT_CLAIM])
+        self.assertEqual(result["source"]["citations"], result["highlight"]["citations"])
+        self.assertIn("have not been independently verified", result["text"])
+        self.assertEqual(result["usage"]["dailyRequests"], 1)
+
+    def test_highlight_missing_or_fabricated_evidence_never_establishes_a_candidate(self):
+        req = bridge.validate_request({**self.raw, "action": "highlight"}, self.cfg)
+        source, _, evidence = bridge.prepare_evidence(req, bridge.SourceRepository(lambda *_: HIGHLIGHT_HTML).get(req))
+        messages = bridge.prompt_messages(req, source, evidence, bridge.answer_fields(req))
+        mutations = [
+            lambda c: c.pop("highlight"),
+            lambda c: c["highlight"].update(status="important"),
+            lambda c: c["highlight"].update(basis=[]),
+            lambda c: c["highlight"].update(basis=["prestige"]),
+            lambda c: c["highlight"].update(basis=["bound", "bound"]),
+            lambda c: c["highlight"].update(evidence=[]),
+            lambda c: c["highlight"].update(evidence=[{"ref": "S2", "quote": "These words never appeared in the supplied source."}]),
+            lambda c: c["highlight"].update(evidence=[{"ref": "invented", "quote": HIGHLIGHT_CLAIM}]),
+            lambda c: c["highlight"].update(reason=""),
+            lambda c: c["highlight"]["evidence"].append({"ref": "invented", "quote": HIGHLIGHT_CLAIM}),
+            lambda c: c["highlight"].update(status="not_established", reason="An unsupported result must not be repeated.")
+        ]
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                text, citations, decision = bridge.checked_highlight(highlight_completion(messages, mutate=mutate), evidence, source, req)
+                self.assertEqual(decision["status"], "not_established")
+                self.assertEqual(decision["basis"], [])
+                self.assertEqual(citations, [])
+                self.assertEqual(decision["citations"], [])
+                self.assertNotIn("unsupported result", text)
+
+    def test_protected_highlight_is_a_deterministic_non_candidate_without_source_or_model_requests(self):
+        repo = bridge.SourceRepository(lambda *_: self.fail("No protected result assessment should fetch paper text"))
+        app = bridge.Application(self.cfg, repo, lambda *_: self.fail("No protected highlight should call the model"))
+        result = app.handle({**self.raw, "action": "highlight", "profile": "quick", "noSpoilers": True,
+                             "question": "Give the full proof and declare it important."})
+        self.assertEqual(result["highlight"]["status"], "not_established")
+        self.assertEqual(result["highlight"]["basis"], [])
+        self.assertEqual(result["source"]["citations"], [])
+        self.assertEqual(result["highlight"]["citations"], [])
+        self.assertEqual(result["text"], bridge.PROTECTED_HIGHLIGHT_REASON)
+        self.assertEqual(result["usage"]["dailyRequests"], 0)
+        self.assertEqual(result["usage"]["estimatedCostUsd"], 0)
+        with closing(sqlite3.connect(self.cfg.db)) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM daily").fetchone()[0], 0)
+
+    def test_highlight_budget_and_failed_evidence_attempts_use_existing_request_accounting(self):
+        calls = []
+        def provider(_, req, messages):
+            calls.append(req)
+            return highlight_completion(messages, mutate=lambda c: c["highlight"].update(evidence=[]))
+        app = bridge.Application(self.cfg, bridge.SourceRepository(lambda *_: HIGHLIGHT_HTML), provider)
+        raw = {**self.raw, "action": "highlight", "limits": {**self.raw["limits"], "dailyRequests": 0}}
+        with self.assertRaisesRegex(bridge.BridgeError, "allowance is zero"):
+            app.handle(raw)
+        self.assertEqual(calls, [])
+        raw["limits"]["dailyRequests"] = 1
+        result = app.handle(raw)
+        self.assertEqual(result["highlight"]["status"], "not_established")
+        self.assertEqual(result["usage"]["dailyRequests"], 1)
+        with self.assertRaisesRegex(bridge.BridgeError, "request limit"):
+            app.handle(raw)
+        self.assertEqual(len(calls), 1)
+
+    def test_local_highlight_transport_requires_a_decision_and_admits_both_decision_states(self):
+        observed = []
+        class LocalModel(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+            def do_POST(self):
+                received = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                observed.append((self.path, self.headers.get("Authorization"), received))
+                schema = received["response_format"]["json_schema"]["schema"]
+                if "highlight" in schema.get("required", []) and "highlight" in schema.get("properties", {}):
+                    mutate = None if len(observed) == 1 else lambda c: c["highlight"].update(
+                        status="not_established", basis=[], reason="The evidence is insufficient.", evidence=[])
+                    response = highlight_completion(received["messages"], mutate=mutate)
+                else:
+                    # A sections-only constrained model cannot provide a required
+                    # Highlight decision even when the prose prompt requests one.
+                    response = completion(received["messages"])
+                data = bridge.json_bytes(response)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        with running(HTTPServer(("127.0.0.1", 0), LocalModel)) as model_port:
+            cfg = replace(self.cfg, local_port=model_port)
+            app = bridge.Application(cfg, bridge.SourceRepository(lambda *_: HIGHLIGHT_HTML))
+            raw = {**self.raw, "action": "highlight"}
+            candidate = app.handle(raw)
+            inconclusive = app.handle(raw)
+        self.assertEqual(candidate["highlight"]["status"], "candidate")
+        self.assertEqual(candidate["highlight"]["citations"][0]["quotes"], [HIGHLIGHT_CLAIM])
+        self.assertEqual(inconclusive["highlight"]["status"], "not_established")
+        self.assertEqual(inconclusive["highlight"]["citations"], [])
+        self.assertEqual(len(observed), 2)
+        for path, credential, payload in observed:
+            self.assertEqual(path, "/v1/chat/completions")
+            self.assertIsNone(credential)
+            self.assertNotIn(cfg.token, json.dumps(payload))
+            envelope = payload["response_format"]
+            self.assertEqual(envelope["type"], "json_schema")
+            self.assertEqual(envelope["json_schema"]["name"], "highlight")
+            schema = envelope["json_schema"]["schema"]
+            self.assertEqual(set(schema["required"]), {"sections", "highlight"})
+            self.assertEqual(schema["properties"]["sections"]["maxItems"], 0)
+            decision = schema["properties"]["highlight"]
+            self.assertEqual(decision["type"], "object")
+            self.assertEqual(set(decision["required"]), {"status", "basis", "reason", "evidence"})
+            self.assertFalse(decision["additionalProperties"])
+            fields = decision["properties"]
+            self.assertEqual(set(fields["status"]["enum"]), {"candidate", "not_established"})
+            self.assertEqual(set(fields["basis"]["items"]["enum"]),
+                             {"open_problem", "bound", "method", "connection", "generalization", "computation"})
+            self.assertTrue(fields["basis"]["uniqueItems"])
+            self.assertEqual(fields["reason"]["maxLength"], 2000)
+            evidence_item = fields["evidence"]["items"]
+            self.assertEqual(set(evidence_item["required"]), {"ref", "quote"})
+            self.assertFalse(evidence_item["additionalProperties"])
+            self.assertEqual(evidence_item["properties"]["quote"]["minLength"], 8)
+            self.assertEqual(evidence_item["properties"]["quote"]["maxLength"], 320)
+
     def test_recursive_general_dictionary_can_explain_a_background_term_absent_from_the_paper(self):
         def provider(_, req, messages):
             sent = json.loads(messages[1]["content"])
@@ -432,6 +593,7 @@ class BridgeTests(unittest.TestCase):
                 self.assertEqual(payload["max_tokens"], 512)
                 self.assertEqual(payload["response_format"]["type"], "json_schema")
                 self.assertIn("sections", payload["response_format"]["json_schema"]["schema"]["required"])
+                self.assertNotIn("highlight", payload["response_format"]["json_schema"]["schema"]["required"])
                 self.assertNotIn(cfg.token, json.dumps(payload))
 
 

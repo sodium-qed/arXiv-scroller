@@ -1,0 +1,1846 @@
+{
+  "schema_version": 1,
+  "review_date": "2026-11-26",
+  "baseline_commit": "a36bce4",
+  "selection": "none_validated",
+  "scope": "Primary-source investigation, labelled nonrepresentative access probes, and a complete OpenAIRE census of frozen Today and Recent populations.",
+  "score_policy": "Unknown scores and coverage remain null. No numeric total is assigned without supporting empirical evidence.",
+  "providers": [
+    {
+      "id": "arxiv",
+      "name": "Official arXiv",
+      "reviewed_on": "2026-11-26",
+      "metrics_investigated": [],
+      "metric_definition_summary": "No public individual-paper usage endpoint established.",
+      "authentication": "public_metadata_only",
+      "candidate_for_future_validation": false,
+      "selected_as_default": false,
+      "measurement_window": "not_applicable",
+      "rising_supported": false,
+      "evaluation_status": "documented_unavailable",
+      "documentation_confidence": "high",
+      "empirical_confidence": "not_measured",
+      "population_coverage": {
+        "today": null,
+        "recent": null
+      },
+      "rubric": {
+        "recent_metric_coverage": {
+          "maximum": 25,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "freshness": {
+          "maximum": 20,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "measurement_validity": {
+          "maximum": 20,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "pure_mathematics_coverage": {
+          "maximum": 15,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "accessibility": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "cost_and_limits": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        }
+      },
+      "total_score": null,
+      "sources": [
+        "https://info.arxiv.org/help/faq/statfaq.html"
+      ]
+    },
+    {
+      "id": "ads",
+      "name": "ADS / SciX",
+      "reviewed_on": "2026-11-26",
+      "metrics_investigated": [
+        "read_count"
+      ],
+      "metric_definition_summary": "Combined ADS/arXiv accesses; rolling 90-day window.",
+      "authentication": "bearer_token",
+      "candidate_for_future_validation": true,
+      "selected_as_default": false,
+      "measurement_window": "rolling_90_days",
+      "rising_supported": false,
+      "evaluation_status": "auth_failure",
+      "documentation_confidence": "high",
+      "empirical_confidence": "bounded_probe_only",
+      "population_coverage": {
+        "today": null,
+        "recent": null
+      },
+      "rubric": {
+        "recent_metric_coverage": {
+          "maximum": 25,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "freshness": {
+          "maximum": 20,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "measurement_validity": {
+          "maximum": 20,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "pure_mathematics_coverage": {
+          "maximum": 15,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "accessibility": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "cost_and_limits": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        }
+      },
+      "total_score": null,
+      "sources": [
+        "https://adsabs.github.io/scixhelp/search-scix/comprehensive-solr-term-list",
+        "https://adsabs.github.io/scixhelp/api-scix/",
+        "https://adsabs.github.io/scixhelp/policies-scix/terms",
+        "https://adsabs.github.io/help/policies/rate-limits"
+      ],
+      "bounded_probe": {
+        "arxiv_id": "2611.33166",
+        "observed_at": "2026-11-26T23:31:10Z",
+        "http_status": 401,
+        "outcome": "auth_failure",
+        "sample_is_representative": false,
+        "evidence": "../../research/trending/provider-probes.json",
+        "coverage_inference": "none"
+      },
+      "retention": {
+        "default_archival_allowed": false,
+        "default_public_redistribution_allowed": false,
+        "reason": "Provider terms require contact before regular storage and restrict third-party redistribution; no exception established."
+      }
+    },
+    {
+      "id": "mendeley",
+      "name": "Mendeley",
+      "reviewed_on": "2026-11-26",
+      "metrics_investigated": [
+        "reader_count",
+        "group_count"
+      ],
+      "metric_definition_summary": "Current library saves and group membership.",
+      "authentication": "oauth",
+      "candidate_for_future_validation": true,
+      "selected_as_default": false,
+      "measurement_window": "current_membership",
+      "rising_supported": false,
+      "evaluation_status": "auth_failure",
+      "documentation_confidence": "high",
+      "empirical_confidence": "bounded_probe_only",
+      "population_coverage": {
+        "today": null,
+        "recent": null
+      },
+      "rubric": {
+        "recent_metric_coverage": {
+          "maximum": 25,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "freshness": {
+          "maximum": 20,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "measurement_validity": {
+          "maximum": 20,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "pure_mathematics_coverage": {
+          "maximum": 15,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "accessibility": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "cost_and_limits": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        }
+      },
+      "total_score": null,
+      "sources": [
+        "https://dev.mendeley.com/methods",
+        "https://dev.mendeley.com/overview/core_resources.html"
+      ],
+      "bounded_probe": {
+        "arxiv_id": "2611.33166",
+        "observed_at": "2026-11-26T23:31:10Z",
+        "http_status": 401,
+        "outcome": "auth_failure",
+        "sample_is_representative": false,
+        "evidence": "../../research/trending/provider-probes.json",
+        "coverage_inference": "none"
+      }
+    },
+    {
+      "id": "openaire",
+      "name": "OpenAIRE UsageCounts",
+      "reviewed_on": "2026-11-26",
+      "metrics_investigated": [
+        "usageCounts.views",
+        "usageCounts.downloads"
+      ],
+      "metric_definition_summary": "Participating-repository usage; Graph metric window not established.",
+      "authentication": "optional_token",
+      "candidate_for_future_validation": true,
+      "selected_as_default": false,
+      "measurement_window": "unknown",
+      "rising_supported": false,
+      "evaluation_status": "complete_census_insufficient_metric_coverage",
+      "documentation_confidence": "high",
+      "empirical_confidence": "complete_frozen_populations_single_observation_period",
+      "population_coverage": {
+        "recent": {
+          "eligible": 2555,
+          "matched": 6,
+          "indexing_fraction": 0.0023483365949119373,
+          "not_matched_by_exact_query": 2549,
+          "measured_by_metric": {
+            "views": 0,
+            "downloads": 0
+          },
+          "metric_coverage_fraction": 0,
+          "positive_by_metric": {
+            "views": 0,
+            "downloads": 0
+          },
+          "genuine_zeros_by_metric": {
+            "views": 0,
+            "downloads": 0
+          },
+          "unresolved": 0,
+          "untested": 0,
+          "complete_population": true,
+          "frozen_at": "2026-11-26T23:33:54.746305+00:00",
+          "population_sha256": "0847fea85df6aa67e3d4a5b5265bb4b1a492c84bc823d9dc4cb736a522530773",
+          "by_announcement_date": {
+            "2026-11-26": {
+              "eligible": 441,
+              "matched": 1,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "2026-11-25": {
+              "eligible": 489,
+              "matched": 2,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "2026-11-24": {
+              "eligible": 869,
+              "matched": 2,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "2026-11-23": {
+              "eligible": 352,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "2026-11-20": {
+              "eligible": 404,
+              "matched": 1,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            }
+          },
+          "by_submission_type": {
+            "unknown": {
+              "eligible": 2555,
+              "matched": 6,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            }
+          },
+          "by_category": {
+            "math.AC": {
+              "eligible": 46,
+              "matched": 1,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.AG": {
+              "eligible": 180,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.AP": {
+              "eligible": 334,
+              "matched": 2,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.AT": {
+              "eligible": 41,
+              "matched": 1,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.CA": {
+              "eligible": 54,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.CO": {
+              "eligible": 353,
+              "matched": 1,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.CT": {
+              "eligible": 17,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.CV": {
+              "eligible": 65,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.DG": {
+              "eligible": 163,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.DS": {
+              "eligible": 141,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.FA": {
+              "eligible": 126,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.GM": {
+              "eligible": 22,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.GN": {
+              "eligible": 17,
+              "matched": 1,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.GR": {
+              "eligible": 76,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.GT": {
+              "eligible": 59,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.HO": {
+              "eligible": 13,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.IT": {
+              "eligible": 123,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.KT": {
+              "eligible": 14,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.LO": {
+              "eligible": 44,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.MG": {
+              "eligible": 48,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.MP": {
+              "eligible": 263,
+              "matched": 3,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.NA": {
+              "eligible": 189,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.NT": {
+              "eligible": 207,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.OA": {
+              "eligible": 43,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.OC": {
+              "eligible": 229,
+              "matched": 1,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.PR": {
+              "eligible": 223,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.QA": {
+              "eligible": 39,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.RA": {
+              "eligible": 67,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.RT": {
+              "eligible": 77,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.SG": {
+              "eligible": 18,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.SP": {
+              "eligible": 52,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.ST": {
+              "eligible": 102,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            }
+          }
+        },
+        "today": {
+          "eligible": 701,
+          "matched": 179,
+          "indexing_fraction": 0.2553495007132668,
+          "not_matched_by_exact_query": 522,
+          "measured_by_metric": {
+            "views": 0,
+            "downloads": 0
+          },
+          "metric_coverage_fraction": 0,
+          "positive_by_metric": {
+            "views": 0,
+            "downloads": 0
+          },
+          "genuine_zeros_by_metric": {
+            "views": 0,
+            "downloads": 0
+          },
+          "unresolved": 0,
+          "untested": 0,
+          "complete_population": true,
+          "frozen_at": "2026-11-26T23:37:45.314388+00:00",
+          "population_sha256": "c060db9f5e99f18039707ece3268e2d03118e717339af49c1548e9283fad19e9",
+          "by_announcement_date": {
+            "2026-11-26": {
+              "eligible": 701,
+              "matched": 179,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            }
+          },
+          "by_submission_type": {
+            "new": {
+              "eligible": 379,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "cross": {
+              "eligible": 61,
+              "matched": 1,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "replacement": {
+              "eligible": 261,
+              "matched": 178,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            }
+          },
+          "by_category": {
+            "math.AC": {
+              "eligible": 9,
+              "matched": 4,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.AG": {
+              "eligible": 60,
+              "matched": 19,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.AP": {
+              "eligible": 79,
+              "matched": 10,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.AT": {
+              "eligible": 16,
+              "matched": 8,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.CA": {
+              "eligible": 9,
+              "matched": 3,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.CO": {
+              "eligible": 83,
+              "matched": 19,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.CT": {
+              "eligible": 11,
+              "matched": 4,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.CV": {
+              "eligible": 15,
+              "matched": 2,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.DG": {
+              "eligible": 45,
+              "matched": 8,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.DS": {
+              "eligible": 46,
+              "matched": 8,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.FA": {
+              "eligible": 40,
+              "matched": 7,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.GM": {
+              "eligible": 8,
+              "matched": 1,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.GN": {
+              "eligible": 2,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.GR": {
+              "eligible": 28,
+              "matched": 7,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.GT": {
+              "eligible": 16,
+              "matched": 4,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.HO": {
+              "eligible": 1,
+              "matched": 1,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.IT": {
+              "eligible": 35,
+              "matched": 9,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.KT": {
+              "eligible": 5,
+              "matched": 3,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.LO": {
+              "eligible": 17,
+              "matched": 8,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.MG": {
+              "eligible": 13,
+              "matched": 5,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.MP": {
+              "eligible": 76,
+              "matched": 22,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.NA": {
+              "eligible": 48,
+              "matched": 13,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.NT": {
+              "eligible": 47,
+              "matched": 10,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.OA": {
+              "eligible": 13,
+              "matched": 2,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.OC": {
+              "eligible": 61,
+              "matched": 18,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.PR": {
+              "eligible": 59,
+              "matched": 14,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.QA": {
+              "eligible": 15,
+              "matched": 8,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.RA": {
+              "eligible": 14,
+              "matched": 4,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.RT": {
+              "eligible": 20,
+              "matched": 3,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.SG": {
+              "eligible": 4,
+              "matched": 3,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.SP": {
+              "eligible": 11,
+              "matched": 0,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            },
+            "math.ST": {
+              "eligible": 34,
+              "matched": 13,
+              "measured_by_metric": {
+                "views": 0,
+                "downloads": 0
+              }
+            }
+          }
+        }
+      },
+      "rubric": {
+        "recent_metric_coverage": {
+          "maximum": 25,
+          "score": null,
+          "status": "measured_zero_coverage_in_frozen_census"
+        },
+        "freshness": {
+          "maximum": 20,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "measurement_validity": {
+          "maximum": 20,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "pure_mathematics_coverage": {
+          "maximum": 15,
+          "score": null,
+          "status": "all_32_categories_populated_no_usage_values"
+        },
+        "accessibility": {
+          "maximum": 10,
+          "score": null,
+          "status": "anonymous_exact_id_census_succeeded"
+        },
+        "cost_and_limits": {
+          "maximum": 10,
+          "score": null,
+          "status": "56_census_requests_59_total_within_60_hourly_anonymous_limit"
+        }
+      },
+      "total_score": null,
+      "sources": [
+        "https://graph.openaire.eu/docs/data-model/entities/other/",
+        "https://graph.openaire.eu/docs/apis/graph-api/filter-based-queries/research-products/filter-syntax/",
+        "https://graph.openaire.eu/docs/apis/terms/"
+      ],
+      "bounded_probe": {
+        "arxiv_id": "2611.33166",
+        "observed_at": "2026-11-26T23:31:10Z",
+        "http_status": 200,
+        "outcome": "not_indexed",
+        "sample_is_representative": false,
+        "evidence": "../../research/trending/provider-probes.json",
+        "coverage_inference": "none"
+      },
+      "retention": {
+        "license": "CC-BY",
+        "attribution_required": true,
+        "source": "https://graph.openaire.eu/docs/apis/terms/"
+      },
+      "documented_request_limits": {
+        "unauthenticated_per_hour": 60,
+        "authenticated_per_hour": 7200,
+        "use_stricter_observed_limit": true
+      },
+      "census_evidence": "../../research/trending/coverage-results.json",
+      "limitations": [
+        "No available usage values in this cohort; unavailable values are not zero.",
+        "No longitudinal observations or proved measurement window.",
+        "Today metadata matches are dominated by older replacements.",
+        "No general claim about future cohorts or other providers is supported."
+      ]
+    },
+    {
+      "id": "alphaxiv",
+      "name": "alphaXiv",
+      "reviewed_on": "2026-11-26",
+      "metrics_investigated": [
+        "platform_views",
+        "platform_votes"
+      ],
+      "metric_definition_summary": "Third-party platform activity; raw complete-population contract unvalidated.",
+      "authentication": "oauth_or_api_key",
+      "candidate_for_future_validation": true,
+      "selected_as_default": false,
+      "measurement_window": "unknown",
+      "rising_supported": false,
+      "evaluation_status": "untested",
+      "documentation_confidence": "high",
+      "empirical_confidence": "not_measured",
+      "population_coverage": {
+        "today": null,
+        "recent": null
+      },
+      "rubric": {
+        "recent_metric_coverage": {
+          "maximum": 25,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "freshness": {
+          "maximum": 20,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "measurement_validity": {
+          "maximum": 20,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "pure_mathematics_coverage": {
+          "maximum": 15,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "accessibility": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "cost_and_limits": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        }
+      },
+      "total_score": null,
+      "sources": [
+        "https://www.alphaxiv.org/docs/mcp"
+      ]
+    },
+    {
+      "id": "arcxiv",
+      "name": "ArcXiv",
+      "reviewed_on": "2026-11-26",
+      "metrics_investigated": [],
+      "metric_definition_summary": "Public API probe matched metadata but returned no raw readership field.",
+      "authentication": "anonymous",
+      "candidate_for_future_validation": false,
+      "selected_as_default": false,
+      "measurement_window": "unknown",
+      "rising_supported": false,
+      "evaluation_status": "indexed_metric_unavailable",
+      "documentation_confidence": "high",
+      "empirical_confidence": "bounded_probe_only",
+      "population_coverage": {
+        "today": null,
+        "recent": null
+      },
+      "rubric": {
+        "recent_metric_coverage": {
+          "maximum": 25,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "freshness": {
+          "maximum": 20,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "measurement_validity": {
+          "maximum": 20,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "pure_mathematics_coverage": {
+          "maximum": 15,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "accessibility": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "cost_and_limits": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        }
+      },
+      "total_score": null,
+      "sources": [
+        "https://arcxiv.org/docs/agents",
+        "https://arcxiv.org/feed/trending"
+      ],
+      "bounded_probe": {
+        "arxiv_id": "2611.33166",
+        "observed_at": "2026-11-26T23:31:10Z",
+        "http_status": 200,
+        "outcome": "indexed_metric_unavailable",
+        "sample_is_representative": false,
+        "evidence": "../../research/trending/provider-probes.json",
+        "coverage_inference": "none"
+      }
+    },
+    {
+      "id": "emergentmind",
+      "name": "Emergent Mind",
+      "reviewed_on": "2026-11-26",
+      "metrics_investigated": [
+        "twitter_likes_count",
+        "hacker_news_points_count",
+        "reddit_points_count",
+        "youtube_paper_mentions_count",
+        "citations_count"
+      ],
+      "metric_definition_summary": "Separate social and citation counters; not reads.",
+      "authentication": "api_key",
+      "candidate_for_future_validation": true,
+      "selected_as_default": false,
+      "measurement_window": "unknown",
+      "rising_supported": false,
+      "evaluation_status": "untested",
+      "documentation_confidence": "high",
+      "empirical_confidence": "not_measured",
+      "population_coverage": {
+        "today": null,
+        "recent": null
+      },
+      "rubric": {
+        "recent_metric_coverage": {
+          "maximum": 25,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "freshness": {
+          "maximum": 20,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "measurement_validity": {
+          "maximum": 20,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "pure_mathematics_coverage": {
+          "maximum": 15,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "accessibility": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "cost_and_limits": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        }
+      },
+      "total_score": null,
+      "sources": [
+        "https://www.emergentmind.com/docs/api"
+      ]
+    },
+    {
+      "id": "semantic-scholar",
+      "name": "Semantic Scholar",
+      "reviewed_on": "2026-11-26",
+      "metrics_investigated": [
+        "citationCount"
+      ],
+      "metric_definition_summary": "Bibliographic citations, not readership.",
+      "authentication": "optional_api_key",
+      "candidate_for_future_validation": true,
+      "selected_as_default": false,
+      "measurement_window": "citation_count_current",
+      "rising_supported": false,
+      "evaluation_status": "rate_limit_failure",
+      "documentation_confidence": "high",
+      "empirical_confidence": "bounded_probe_only",
+      "population_coverage": {
+        "today": null,
+        "recent": null
+      },
+      "rubric": {
+        "recent_metric_coverage": {
+          "maximum": 25,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "freshness": {
+          "maximum": 20,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "measurement_validity": {
+          "maximum": 20,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "pure_mathematics_coverage": {
+          "maximum": 15,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "accessibility": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "cost_and_limits": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        }
+      },
+      "total_score": null,
+      "sources": [
+        "https://api.semanticscholar.org/api-docs/graphs",
+        "https://api.semanticscholar.org/license/"
+      ],
+      "bounded_probe": {
+        "arxiv_id": "2611.33166",
+        "observed_at": "2026-11-26T23:31:10Z",
+        "http_status": 429,
+        "outcome": "rate_limit_failure",
+        "sample_is_representative": false,
+        "evidence": "../../research/trending/provider-probes.json",
+        "coverage_inference": "none"
+      }
+    },
+    {
+      "id": "openalex",
+      "name": "OpenAlex",
+      "reviewed_on": "2026-11-26",
+      "metrics_investigated": [
+        "cited_by_count"
+      ],
+      "metric_definition_summary": "Matched citing works, not readership.",
+      "authentication": "optional_api_key",
+      "candidate_for_future_validation": true,
+      "selected_as_default": false,
+      "measurement_window": "citation_count_current",
+      "rising_supported": false,
+      "evaluation_status": "untested",
+      "documentation_confidence": "high",
+      "empirical_confidence": "not_measured",
+      "population_coverage": {
+        "today": null,
+        "recent": null
+      },
+      "rubric": {
+        "recent_metric_coverage": {
+          "maximum": 25,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "freshness": {
+          "maximum": 20,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "measurement_validity": {
+          "maximum": 20,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "pure_mathematics_coverage": {
+          "maximum": 15,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "accessibility": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "cost_and_limits": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        }
+      },
+      "total_score": null,
+      "sources": [
+        "https://help.openalex.org/data/works/attributes/",
+        "https://help.openalex.org/api/"
+      ]
+    },
+    {
+      "id": "altmetric",
+      "name": "Altmetric",
+      "reviewed_on": "2026-11-26",
+      "metrics_investigated": [
+        "source_specific_attention"
+      ],
+      "metric_definition_summary": "Attention data under granted key/license scope.",
+      "authentication": "licensed_api_key",
+      "candidate_for_future_validation": true,
+      "selected_as_default": false,
+      "measurement_window": "source_specific",
+      "rising_supported": false,
+      "evaluation_status": "untested",
+      "documentation_confidence": "high",
+      "empirical_confidence": "not_measured",
+      "population_coverage": {
+        "today": null,
+        "recent": null
+      },
+      "rubric": {
+        "recent_metric_coverage": {
+          "maximum": 25,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "freshness": {
+          "maximum": 20,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "measurement_validity": {
+          "maximum": 20,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "pure_mathematics_coverage": {
+          "maximum": 15,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "accessibility": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "cost_and_limits": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        }
+      },
+      "total_score": null,
+      "sources": [
+        "https://help.altmetric.com/en/articles/9806401"
+      ]
+    },
+    {
+      "id": "plumx",
+      "name": "PlumX",
+      "reviewed_on": "2026-11-26",
+      "metrics_investigated": [
+        "source_specific_usage",
+        "source_specific_captures",
+        "source_specific_mentions"
+      ],
+      "metric_definition_summary": "Metric families must remain separate.",
+      "authentication": "active_scopus_subscription",
+      "candidate_for_future_validation": true,
+      "selected_as_default": false,
+      "measurement_window": "source_specific",
+      "rising_supported": false,
+      "evaluation_status": "untested",
+      "documentation_confidence": "high",
+      "empirical_confidence": "not_measured",
+      "population_coverage": {
+        "today": null,
+        "recent": null
+      },
+      "rubric": {
+        "recent_metric_coverage": {
+          "maximum": 25,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "freshness": {
+          "maximum": 20,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "measurement_validity": {
+          "maximum": 20,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "pure_mathematics_coverage": {
+          "maximum": 15,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "accessibility": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "cost_and_limits": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        }
+      },
+      "total_score": null,
+      "sources": [
+        "https://dev.elsevier.com/documentation/PlumXMetricsAPI.wadl",
+        "https://www.elsevier.com/insights/metrics/plumx"
+      ]
+    },
+    {
+      "id": "crossref",
+      "name": "Crossref Event Data",
+      "reviewed_on": "2026-11-26",
+      "metrics_investigated": [],
+      "metric_definition_summary": "Event Data retired April 23, 2026; historical archive only.",
+      "authentication": "not_applicable",
+      "candidate_for_future_validation": false,
+      "selected_as_default": false,
+      "measurement_window": "historical",
+      "rising_supported": false,
+      "evaluation_status": "retired",
+      "documentation_confidence": "high",
+      "empirical_confidence": "not_measured",
+      "population_coverage": {
+        "today": null,
+        "recent": null
+      },
+      "rubric": {
+        "recent_metric_coverage": {
+          "maximum": 25,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "freshness": {
+          "maximum": 20,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "measurement_validity": {
+          "maximum": 20,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "pure_mathematics_coverage": {
+          "maximum": 15,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "accessibility": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "cost_and_limits": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        }
+      },
+      "total_score": null,
+      "sources": [
+        "https://www.crossref.org/blog/strengthening-support-for-data-citations-and-saying-goodbye-to-event-data/"
+      ]
+    },
+    {
+      "id": "mathoverflow",
+      "name": "MathOverflow",
+      "reviewed_on": "2026-11-26",
+      "metrics_investigated": [
+        "linked_questions"
+      ],
+      "metric_definition_summary": "Observed scholarly discussion, with bounded search semantics.",
+      "authentication": "endpoint_dependent",
+      "candidate_for_future_validation": true,
+      "selected_as_default": false,
+      "measurement_window": "query_specific",
+      "rising_supported": false,
+      "evaluation_status": "untested",
+      "documentation_confidence": "high",
+      "empirical_confidence": "not_measured",
+      "population_coverage": {
+        "today": null,
+        "recent": null
+      },
+      "rubric": {
+        "recent_metric_coverage": {
+          "maximum": 25,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "freshness": {
+          "maximum": 20,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "measurement_validity": {
+          "maximum": 20,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "pure_mathematics_coverage": {
+          "maximum": 15,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "accessibility": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "cost_and_limits": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        }
+      },
+      "total_score": null,
+      "sources": [
+        "https://mathoverflow.net/help/searching",
+        "https://api.stackexchange.com/docs/advanced-search"
+      ]
+    },
+    {
+      "id": "bluesky",
+      "name": "Bluesky",
+      "reviewed_on": "2026-11-26",
+      "metrics_investigated": [
+        "linked_posts"
+      ],
+      "metric_definition_summary": "Observed social mentions; completeness and aliases require validation.",
+      "authentication": "implementation_dependent",
+      "candidate_for_future_validation": true,
+      "selected_as_default": false,
+      "measurement_window": "query_specific",
+      "rising_supported": false,
+      "evaluation_status": "untested",
+      "documentation_confidence": "moderate",
+      "empirical_confidence": "not_measured",
+      "population_coverage": {
+        "today": null,
+        "recent": null
+      },
+      "rubric": {
+        "recent_metric_coverage": {
+          "maximum": 25,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "freshness": {
+          "maximum": 20,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "measurement_validity": {
+          "maximum": 20,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "pure_mathematics_coverage": {
+          "maximum": 15,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "accessibility": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "cost_and_limits": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        }
+      },
+      "total_score": null,
+      "sources": [
+        "https://github.com/bluesky-social/atproto/blob/main/packages/bsky/src/api/app/bsky/feed/searchPosts.ts"
+      ]
+    },
+    {
+      "id": "scirate",
+      "name": "SciRate",
+      "reviewed_on": "2026-11-26",
+      "metrics_investigated": [
+        "scites"
+      ],
+      "metric_definition_summary": "Community platform votes.",
+      "authentication": "public_pages_no_stable_api_verified",
+      "candidate_for_future_validation": true,
+      "selected_as_default": false,
+      "measurement_window": "unknown",
+      "rising_supported": false,
+      "evaluation_status": "untested",
+      "documentation_confidence": "high",
+      "empirical_confidence": "not_measured",
+      "population_coverage": {
+        "today": null,
+        "recent": null
+      },
+      "rubric": {
+        "recent_metric_coverage": {
+          "maximum": 25,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "freshness": {
+          "maximum": 20,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "measurement_validity": {
+          "maximum": 20,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "pure_mathematics_coverage": {
+          "maximum": 15,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "accessibility": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "cost_and_limits": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        }
+      },
+      "total_score": null,
+      "sources": [
+        "https://scirate.com/about",
+        "https://scirate.com/legal",
+        "https://github.com/scirate/scirate"
+      ]
+    },
+    {
+      "id": "zenodo",
+      "name": "Zenodo / institutional repositories",
+      "reviewed_on": "2026-11-26",
+      "metrics_investigated": [
+        "record_views",
+        "file_downloads"
+      ],
+      "metric_definition_summary": "Repository record/file usage; deposited-copy matching required.",
+      "authentication": "repository_dependent",
+      "candidate_for_future_validation": true,
+      "selected_as_default": false,
+      "measurement_window": "record_and_version_specific",
+      "rising_supported": false,
+      "evaluation_status": "untested",
+      "documentation_confidence": "high",
+      "empirical_confidence": "not_measured",
+      "population_coverage": {
+        "today": null,
+        "recent": null
+      },
+      "rubric": {
+        "recent_metric_coverage": {
+          "maximum": 25,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "freshness": {
+          "maximum": 20,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "measurement_validity": {
+          "maximum": 20,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "pure_mathematics_coverage": {
+          "maximum": 15,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "accessibility": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "cost_and_limits": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        }
+      },
+      "total_score": null,
+      "sources": [
+        "https://zenodo.org/help/statistics"
+      ]
+    },
+    {
+      "id": "huggingface",
+      "name": "Hugging Face Papers",
+      "reviewed_on": "2026-11-26",
+      "metrics_investigated": [
+        "upvotes"
+      ],
+      "metric_definition_summary": "Community platform votes; not mathematics population completeness.",
+      "authentication": "endpoint_dependent",
+      "candidate_for_future_validation": true,
+      "selected_as_default": false,
+      "measurement_window": "unknown",
+      "rising_supported": false,
+      "evaluation_status": "untested",
+      "documentation_confidence": "moderate",
+      "empirical_confidence": "not_measured",
+      "population_coverage": {
+        "today": null,
+        "recent": null
+      },
+      "rubric": {
+        "recent_metric_coverage": {
+          "maximum": 25,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "freshness": {
+          "maximum": 20,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "measurement_validity": {
+          "maximum": 20,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "pure_mathematics_coverage": {
+          "maximum": 15,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "accessibility": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "cost_and_limits": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        }
+      },
+      "total_score": null,
+      "sources": [
+        "https://huggingface.co/docs/huggingface_hub/main/en/package_reference/hf_api",
+        "https://github.com/huggingface/huggingface_hub/blob/main/src/huggingface_hub/cli/papers.py"
+      ]
+    },
+    {
+      "id": "scholarfeed",
+      "name": "Scholar Feed",
+      "reviewed_on": "2026-11-26",
+      "metrics_investigated": [],
+      "metric_definition_summary": "Recommendation/impact composite unsuitable as observed readership.",
+      "authentication": "api_key_documented",
+      "candidate_for_future_validation": false,
+      "selected_as_default": false,
+      "measurement_window": "not_applicable",
+      "rising_supported": false,
+      "evaluation_status": "semantics_rejected",
+      "documentation_confidence": "high",
+      "empirical_confidence": "not_measured",
+      "population_coverage": {
+        "today": null,
+        "recent": null
+      },
+      "rubric": {
+        "recent_metric_coverage": {
+          "maximum": 25,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "freshness": {
+          "maximum": 20,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "measurement_validity": {
+          "maximum": 20,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "pure_mathematics_coverage": {
+          "maximum": 15,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "accessibility": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "cost_and_limits": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        }
+      },
+      "total_score": null,
+      "sources": [
+        "https://www.scholarfeed.org/developers/api"
+      ]
+    },
+    {
+      "id": "papers-cool",
+      "name": "papers.cool and keyword-ranking projects",
+      "reviewed_on": "2026-11-26",
+      "metrics_investigated": [],
+      "metric_definition_summary": "Discovery interfaces; no verified readership API.",
+      "authentication": "unknown",
+      "candidate_for_future_validation": false,
+      "selected_as_default": false,
+      "measurement_window": "unknown",
+      "rising_supported": false,
+      "evaluation_status": "untested",
+      "documentation_confidence": "moderate",
+      "empirical_confidence": "not_measured",
+      "population_coverage": {
+        "today": null,
+        "recent": null
+      },
+      "rubric": {
+        "recent_metric_coverage": {
+          "maximum": 25,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "freshness": {
+          "maximum": 20,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "measurement_validity": {
+          "maximum": 20,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "pure_mathematics_coverage": {
+          "maximum": 15,
+          "score": null,
+          "status": "pending_empirical_evidence"
+        },
+        "accessibility": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        },
+        "cost_and_limits": {
+          "maximum": 10,
+          "score": null,
+          "status": "qualitative_only"
+        }
+      },
+      "total_score": null,
+      "sources": [
+        "https://github.com/bojone/papers.cool",
+        "https://isaac-tes.github.io/arxiv-digest/"
+      ]
+    }
+  ],
+  "empirical_evidence": {
+    "provider": "openaire",
+    "kind": "census",
+    "started_at": "2026-11-26T23:41:27.990Z",
+    "finished_at": "2026-11-26T23:42:36.712Z",
+    "unique_identifiers": 2783,
+    "request_count": 56,
+    "request_budget": {
+      "documentedAnonymousRequestsPerHour": 60,
+      "censusRequests": 56,
+      "priorDiagnosticRequests": 3,
+      "totalRequestsThisSession": 59,
+      "rateLimited": false
+    },
+    "all_census_requests_http_200": true,
+    "coverage_report": "../../research/trending/coverage-results.json",
+    "per_paper_csv": "../../research/trending/coverage-results.csv",
+    "observations": "../../research/trending/observations.json",
+    "longitudinal": false,
+    "interpretation": "No available view/download values. Missing fields are not measured zeros; query-match rates are cohort-specific and do not establish indexing latency."
+  }
+}

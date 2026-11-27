@@ -1,4 +1,6 @@
 import {activeFeedback, paperFeatures} from './recommender.js';
+import {validateObservationFile, retainObservations, METRIC_DEFINITIONS} from './readership.js';
+import {validatePopulationSnapshot} from './network.js';
 import {SCHEMA_VERSION, DEFAULT_SETTINGS, COLLECTIONS, checkedRecord, recordKey, checkedPaper, checkRevisionGraph,
   mergedSettings, emptyState, validateImport, checkedPublicListing, publicListingKey} from './schema.js';
 
@@ -11,6 +13,8 @@ const REVISION = PREFIX + 'revision';
 const SETTINGS = PREFIX + 'settings';
 const SCHEMA = PREFIX + 'schema';
 const DIGEST = PREFIX + 'listing-digest:';
+const READERSHIP = PREFIX + 'external-readership';
+const FEED_POPULATION = PREFIX + 'feed-population:';
 const LOCAL_QUEUES = new WeakMap();
 
 export function makeId() {
@@ -147,6 +151,12 @@ export class Store {
       if (Array.isArray(state[kind])) state[kind].push(value);
       else Object.defineProperty(state[kind], id, {value, enumerable: true, configurable: true, writable: true});
     }
+    // Older backups and installations kept bookmark metadata in the mutable
+    // paper cache. Expose an independent snapshot until the next cache write
+    // persists it, so loading an old bookmark remains backward compatible.
+    for (const id of Object.keys(state.bookmarks)) {
+      if (!state.savedPapers[id] && state.papers[id]) state.savedPapers[id] = checkedPaper(state.papers[id]);
+    }
     state.events.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp) || a.eventId.localeCompare(b.eventId));
     if (warnings.length) state.storageWarnings = warnings;
     return state;
@@ -165,6 +175,18 @@ export class Store {
 
   generation() { return this.queue(() => this.adapter.get(GENERATION, 'initial')); }
 
+  async preserveSavedPaper(id) {
+    // Called under the storage lock, before a bookmark or cache mutation.
+    // A later listing must never silently upgrade the originally saved version.
+    const key = recordPath('savedPapers', id);
+    if (await this.adapter.get(key, null) !== null) return;
+    const current = await this.adapter.get(recordPath('papers', id), null);
+    if (current === null) return;
+    let paper;
+    try { paper = checkedPaper(current, id); } catch { return; }
+    await this.adapter.set(key, paper);
+  }
+
   async writeRecord(kind, id, value) {
     const key = recordPath(kind, id);
     let data = checkedRecord(kind, id, value);
@@ -175,11 +197,46 @@ export class Store {
       if (existing === null) throw new Error('This feedback event was deleted. Reload the interest history.');
       data = {...checkedRecord(kind, id, existing), excluded: data.excluded};
     }
+    if (kind === 'bookmarks') await this.preserveSavedPaper(id);
     await this.adapter.set(key, data);
     await this.changed();
   }
 
   set(kind, id, value) { return this.queue(() => this.writeRecord(kind, id, value)); }
+
+  bookmarkPaper(rawPaper, timestamp) {
+    const paper = checkedPaper(rawPaper);
+    const markedAt = checkedRecord('bookmarks', paper.id, timestamp);
+    const bookmarkKey = recordPath('bookmarks', paper.id);
+    const snapshotKey = recordPath('savedPapers', paper.id);
+    const paperKey = recordPath('papers', paper.id);
+    return this.queue(async () => {
+      const existing = await this.adapter.get(bookmarkKey, null);
+      const original = await this.adapter.get(snapshotKey, null);
+      const current = await this.adapter.get(paperKey, null);
+      if (existing !== null) checkedRecord('bookmarks', paper.id, existing);
+      // A deliberate new save pins the supplied version, even if it comes from
+      // an older Saved view. Concurrent repeat saves retain the winning original.
+      const snapshot = existing === null ? paper : checkedPaper(original ?? current ?? paper, paper.id);
+      const writes = [];
+      if (current === null) writes.push([paperKey, paper]);
+      if (existing === null || original === null) writes.push([snapshotKey, snapshot]);
+      writes.push([bookmarkKey, markedAt]);
+      const before = [];
+      for (const [key] of writes) before.push([key, await this.adapter.get(key, null)]);
+      const rollback = {kind:'restore', before};
+      await this.adapter.set(JOURNAL, rollback);
+      try {
+        for (const [key, value] of writes) await this.adapter.set(key, value);
+        await this.changed();
+        await this.adapter.remove(JOURNAL);
+        return snapshot;
+      } catch (error) {
+        await this.finishTransaction(rollback);
+        throw error;
+      }
+    });
+  }
 
   setIfGeneration(kind, id, value, expected) {
     return this.queue(async () => {
@@ -235,14 +292,14 @@ export class Store {
   remove(kind, id) {
     const key = recordPath(kind, id);
     if (kind === 'events') throw new Error('Delete all revisions for a paper using the feedback history.');
-    return this.queue(() => this.removeMany([key]));
+    return this.queue(() => this.removeMany(kind === 'bookmarks' ? [key, recordPath('savedPapers', id)] : [key]));
   }
 
   settings(patch) {
     return this.queue(async () => {
       const current = await this.readSettings();
       const value = mergedSettings({...current, ...patch, history: {...current.history, ...patch.history},
-        ai: {...current.ai, ...patch.ai}, paperSpoilers: {...current.paperSpoilers, ...patch.paperSpoilers}});
+        ai: {...current.ai, ...patch.ai}, feeds: {...current.feeds, ...patch.feeds}, paperSpoilers: {...current.paperSpoilers, ...patch.paperSpoilers}});
       await this.adapter.set(SETTINGS, value);
       await this.changed();
       return value;
@@ -252,7 +309,65 @@ export class Store {
   cachePapers(papers) {
     const checked = papers.map(paper => checkedPaper(paper));
     return this.queue(async () => {
-      for (const p of checked) await this.adapter.set(recordPath('papers', p.id), p);
+      for (const p of checked) {
+        const bookmarked = await this.adapter.get(recordPath('bookmarks', p.id), null);
+        if (bookmarked !== null) {
+          let valid = false;
+          try { checkedRecord('bookmarks', p.id, bookmarked); valid = true; } catch { /* Leave malformed private records intact. */ }
+          if (valid) await this.preserveSavedPaper(p.id);
+        }
+        await this.adapter.set(recordPath('papers', p.id), p);
+      }
+    });
+  }
+
+  // Public provider observations have their own namespace and export. Resetting
+  // interests or deleting personal feedback never erases the external history.
+  readership() {
+    return this.queue(async () => {
+      const saved = await this.adapter.get(READERSHIP, {schemaVersion:1, observations:[]});
+      const checked = validateObservationFile(saved).observations;
+      const retained = retainObservations(checked);
+      if (JSON.stringify(retained) !== JSON.stringify(checked)) await this.adapter.set(READERSHIP,{schemaVersion:1,observations:retained});
+      return retained;
+    });
+  }
+
+  importReadership(raw) {
+    const incoming = validateObservationFile(raw).observations;
+    if (incoming.some(o => METRIC_DEFINITIONS[o.provider+':'+o.metric].retentionRestricted && ['indexed','metric_unavailable','zero','positive'].includes(o.status))) throw new Error('This build does not archive successful ADS observations. A separately authorized provider-storage integration is required.');
+    return this.queue(async () => {
+      const current = validateObservationFile(await this.adapter.get(READERSHIP, {schemaVersion:1, observations:[]}));
+      const observations = retainObservations([...current.observations, ...incoming]);
+      await this.adapter.set(READERSHIP, {schemaVersion:1, observations});
+      await this.changed();
+      return observations;
+    });
+  }
+
+  clearReadership() { return this.queue(() => this.removeMany([READERSHIP])); }
+
+  cacheFeedPopulation(raw, expectedGeneration, observedAt = Date.now()) {
+    const population = validatePopulationSnapshot({...raw, papers:raw.papers.map(p => checkedPaper(p))});
+    if (!Number.isSafeInteger(observedAt) || observedAt < 0 || observedAt > Date.now()) throw new Error('Invalid population observation time.');
+    return this.queue(async () => {
+      if (expectedGeneration !== undefined && expectedGeneration !== await this.adapter.get(GENERATION,'initial')) return null;
+      const value = {savedAt:observedAt, population};
+      await this.adapter.set(FEED_POPULATION + population.population, value);
+      return value;
+    });
+  }
+
+  feedPopulation(kind, maxAge = 3600000) {
+    if (!['today','recent'].includes(kind)) throw new Error('Unknown feed population.');
+    return this.queue(async () => {
+      const value = await this.adapter.get(FEED_POPULATION + kind, null);
+      if (!value || !Number.isSafeInteger(value.savedAt) || value.savedAt > Date.now()) return null;
+      try {
+        const population = validatePopulationSnapshot({...value.population, papers:value.population.papers.map(p => checkedPaper(p))});
+        if (population.population !== kind) return null;
+        return {population,savedAt:value.savedAt,stale:Date.now()-value.savedAt>=maxAge};
+      } catch { return null; }
     });
   }
 
@@ -286,7 +401,8 @@ export class Store {
 
   clearCollection(kind) {
     if (!COLLECTIONS.includes(kind)) throw new Error('Unknown data collection.');
-    return this.queue(async () => this.removeMany((await this.adapter.keys()).filter(key => key.startsWith(PREFIX + kind + ':'))));
+    return this.queue(async () => this.removeMany((await this.adapter.keys()).filter(key =>
+      key.startsWith(PREFIX + kind + ':') || (kind === 'bookmarks' && key.startsWith(PREFIX + 'savedPapers:')))));
   }
 
   clearAll() {
@@ -306,7 +422,8 @@ export class Store {
   async import(data) {
     const state = validateImport(data);
     return this.queue(async () => {
-      const oldEvents = (await this.records(['events'])).map(([, , e]) => e);
+      const previous = await this.readState();
+      const oldEvents = previous.events;
       const merged = new Map(oldEvents.map(e => [e.eventId, e]));
       for (const e of state.events) {
         const original = merged.get(e.eventId);
@@ -314,6 +431,13 @@ export class Store {
         merged.set(e.eventId, e);
       }
       checkRevisionGraph([...merged.values()]);
+      // An explicit imported snapshot restores that saved version. Legacy
+      // imports preserve an existing bookmark's original snapshot; a newly
+      // imported bookmark captures its imported paper, or the local fallback.
+      for (const id of new Set([...Object.keys(previous.bookmarks), ...Object.keys(state.bookmarks)])) {
+        const paper = previous.savedPapers[id] || state.papers[id] || previous.papers[id];
+        if (!state.savedPapers[id] && paper) state.savedPapers[id] = checkedPaper(paper);
+      }
       const writes = [];
       for (const kind of COLLECTIONS) for (const [id, value] of entriesOf(state, kind)) writes.push([recordPath(kind, id), value]);
       writes.push([SETTINGS, state.settings], [SCHEMA, SCHEMA_VERSION]);

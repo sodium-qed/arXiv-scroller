@@ -1,6 +1,6 @@
 {
   "name": "arxiv-discovery-userscript",
-  "version": "1.2.5",
+  "version": "1.3.0",
   "private": true,
   "type": "module",
   "description": "An additive, local-first Tampermonkey research discovery companion for arXiv.",
@@ -8,7 +8,10 @@
     "build": "node scripts/build.mjs",
     "test": "node --test tests/*.test.js",
     "test:bridge": "python -m unittest discover -s tests -p 'test_bridge.py'",
-    "test:browser": "python tests/browser_integration.py"
+    "test:browser": "python tests/browser_integration.py",
+    "test:feeds": "python tests/feed_browser.py",
+    "test:parser": "python tests/parser_browser.py",
+    "test:research": "node scripts/replay-readership-experiment.mjs"
   },
   "engines": {"node": ">=20"}
 }

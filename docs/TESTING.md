@@ -2,7 +2,31 @@
 
 The browser suites use the supplied mathematics announcement and generated, clearly labeled fixtures. They intercept requests before navigation and exercise the production parser or the built userscript. No tests require arXiv availability, a hosted AI account, a pairing credential, or a paid request.
 
-## Verified release 1.2.0
+## Verified development build 1.3.0
+
+The feature branch integrates upstream `65802c20f991c8ded25f1567c4fc80fad951d0a2` (version 1.2.5), including Gemini support, protected-answer cache invalidation, stronger spoiler filtering, local structured output and the latest mathematics-rendering fixes. The earlier adaptive-sampling behavior remains covered by its original tests. No merge or release publication is implied by this verification.
+
+| Suite | Final result |
+|---|---:|
+| Node.js unit and security tests | 136 passed |
+| Python bridge tests | 23 passed |
+| Existing userscript browser integration | 20 passed |
+| Parser browser integration | 12 passed |
+| New feed browser integration | 11 passed |
+| Total automated cases | **202 passed** |
+| Archived readership experiment replay | `verified: true`; 56 response hashes, 2,783 queried IDs and all coverage/ranking results reconciled |
+
+Runtime: Node.js 24.22.3, Python 3.12.14, Playwright 1.62.0 and Chromium 158.0.8127.0. The tested userscript contains **507,551 bytes**, with SHA-256 **`9e72e5c387a94ce249c3dd83556fc7a23c5979f3c50f066834f6eb8fc5721b9b`**. Both userscript browser suites used this final rebased bundle; parser and bridge sources were unchanged by the final upstream math-only update. The bridge schema integration was tested separately through its real loopback transport fixture.
+
+The feed cases check all ten choices, Today navigation, complete Recent pagination, multi-date cohorts, refresh expiry, compatible offline reuse, honest missing-data states, import atomicity, global coverage denominators after filters, ties and keyboard ranking order. Pending requests cannot navigate, write a cache or continue an AI batch after the view or data generation changes. Highlights tests cover candidate evidence, inconclusive decisions, protection changes, duplicate-note removal and cancellation.
+
+Saved regression checks start with a legacy rich version-2 bookmark and a sparse unknown-version Recent entry for the same paper. They verify snapshot migration, original abstract/comments/journal metadata and versioned links, canonical metadata preservation after reading/bookmark actions, restored native rows and controls, bookmark removal through the older management dialog, and restart persistence. Backup tests retain exact existing records while explicitly checking the additive legacy snapshot migration.
+
+The readership unit cases use labelled synthetic values for edge conditions, including genuine zero versus missing counts, identifier ambiguity, provider errors, category coverage, stale timestamps, shared ranks, restricted retention and incomparable growth counters. The separate archived census replay uses actual recorded public responses. It confirms 6/2,555 Recent and 179/701 Today exact metadata matches, with no available views or downloads; it does not fabricate future observations or a usable production ranking.
+
+Desktop and 390-pixel phone-width feed/settings screenshots were inspected. Tests intercept external requests and use a disposable userscript-manager adapter. They do not verify a real Tampermonkey install/update prompt, a live hosted-model answer, a closed-browser scheduler or future provider coverage. Existing installed-copy checks below remain the procedure for those environment-specific behaviors.
+
+## Historical verification: release 1.2.0
 
 Node.js 24.22.3 passed all **85 JavaScript tests**; Python 3.12.14 passed all **16 bridge tests**. Chromium 152.0.7977.0 with Playwright 1.62.0 passed all **20 userscript integration cases** and all **7 parser cases**. These checks include the existing local-AI changes merged at `3770c53fc9661bdce716bee7b1899a51e1c4d2db`; the adaptive-sampling change leaves the AI client, transport, bridge and interest model unchanged from that commit.
 
@@ -52,6 +76,8 @@ python -m pip install playwright
 python -m playwright install chromium
 python tests/parser_browser.py
 python tests/browser_integration.py
+python tests/feed_browser.py
+node scripts/replay-readership-experiment.mjs
 ```
 
 The optional PDF extraction test runs when `pypdf` is installed. On a machine with Chrome or Chromium already installed, set `CHROMIUM_BIN` to its executable to use that browser. The integration suite reads `dist/arxiv-discovery.user.js`. Rebuild after changing source files.

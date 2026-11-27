@@ -13,6 +13,7 @@ FIXTURE_PATH = ROOT / "fixtures/arxiv-math-new.html"
 FIXTURE = FIXTURE_PATH.read_text(encoding="utf-8") if FIXTURE_PATH.exists() else gzip.decompress((ROOT / "fixtures/arxiv-math-new.html.gz").read_bytes()).decode("utf-8")
 ORIGIN = "https://arxiv.org"
 BASE = ORIGIN + "/list/math/new"
+RECENT = ORIGIN + "/list/math/recent"
 DATE = "Thursday, 26 November 2026"
 
 
@@ -32,6 +33,14 @@ def listing(rows, total=1, shown=1, category_total=None, date=DATE, pagination="
     <dl id="articles"><h3>{section} (showing {shown} of {available} entries)</h3>{rows}</dl>
     </div>
     """
+
+
+def recent_listing(chunks, pagination="", total=3):
+    """Synthetic fixture; every cohort date and row count is explicitly supplied."""
+    nav = '<ul><li><a href="?skip=0&amp;show=2#item1">2026-11-26</a></li>'
+    nav += '<li><a href="?skip=2&amp;show=2#item3">2026-11-20</a></li></ul>'
+    content = ''.join(f'<dl id="articles"><h3>{heading}</h3>{rows}</dl>' for heading, rows in chunks)
+    return f'<div id="dlpage">{nav}<div class="paging">Total of {total} entries {pagination}</div>{content}</div>'
 
 
 class ParserBrowserTests(unittest.TestCase):
@@ -273,6 +282,107 @@ class ParserBrowserTests(unittest.TestCase):
         self.assertTrue(any("429" in w for w in result["unavailable"]["warnings"]))
         self.assertTrue(any("changed" in w for w in result["changed"]["warnings"]))
         self.assertEqual(result["failed"]["nextUrls"], [BASE + "?show=2&skip=1"])
+
+    def test_supplied_recent_fixture_uses_all_declared_cohorts_and_does_not_invent_sections(self):
+        html = gzip.decompress((ROOT / 'fixtures/arxiv-math-recent.html.gz').read_bytes()).decode('utf-8')
+        parsed = self.parse_listing(html, RECENT)
+        self.assertEqual(parsed['population'], 'recent')
+        self.assertIsNone(parsed['announcementDate'])
+        self.assertEqual(parsed['announcementDates'], ['2026-11-26','2026-11-25','2026-11-24','2026-11-23','2026-11-20'])
+        self.assertEqual(parsed['dateTotals'], {'2026-11-26':441,'2026-11-25':489,'2026-11-24':869,'2026-11-23':352,'2026-11-20':404})
+        self.assertEqual(parsed['advertisedTotal'], 2555)
+        self.assertEqual(parsed['entryCount'], 50)
+        self.assertFalse(parsed['complete'])
+        self.assertIsNone(parsed['distinctTotal'])
+        self.assertEqual(parsed['integrityWarnings'], [])
+        self.assertEqual(parsed['nextUrls'][0], RECENT + '?show=2000&skip=0')
+        self.assertEqual(parsed['papers'][0]['id'], '2611.34933')
+        self.assertTrue(all(p['section'] is None for p in parsed['papers']))
+        self.assertTrue(all(p['announcementDate'] == '2026-11-26' for p in parsed['papers']))
+
+    def test_recent_continued_cohort_pagination_preserves_weekend_gaps_and_original_order(self):
+        first = recent_listing([('2026-11-26 (showing first 1 of 2 entries)', row())],
+            '<a href="?skip=1&amp;show=2">next</a>')
+        second = recent_listing([
+            ('2026-11-26 (continued, showing last 1 of 2 entries )', row('2611.00002', subjects='Information Theory (cs.IT)')),
+            ('2026-11-20 (showing 1 of 1 entries)', row('2611.00003'))])
+        parsed = self.page.evaluate('''async ([first,second,url]) => {
+          const calls=[];
+          const initial=ingest.parseListing(parse(first),url);
+          const result=await network.loadCompleteListing(initial,{parseDocument:parse,request:async url=>{
+            calls.push(url);return {status:200,text:second,finalUrl:url};
+          }});
+          return {result,calls,validated:network.validatePopulationSnapshot(result)};
+        }''', [first,second,RECENT])
+        result = parsed['result']
+        self.assertTrue(result['complete'], result['warnings'])
+        self.assertEqual(parsed['calls'], [RECENT + '?show=2&skip=1'])
+        self.assertEqual(result['entryCount'], 3)
+        self.assertEqual(result['distinctTotal'], 3)
+        self.assertEqual([p['id'] for p in result['papers']], ['2611.00001','2611.00002','2611.00003'])
+        self.assertEqual([p['announcementDate'] for p in result['papers']], ['2026-11-26','2026-11-26','2026-11-20'])
+        self.assertEqual(result['papers'][1]['categories'], ['math.IT'])
+        self.assertTrue(parsed['validated']['complete'])
+
+    def test_recent_deduplicates_ids_without_losing_advertised_rows_or_explicit_submission_type(self):
+        html = recent_listing([
+            ('2026-11-26 (showing 2 of 2 entries)', '<h4>New submissions</h4>' + row('2611.00001v2') +
+                '<h4>Cross submissions</h4>' + row('2611.00002')),
+            ('2026-11-20 (showing 1 of 1 entries)', '<h4>Replacements</h4>' + row('2611.00001v1'))])
+        parsed = self.parse_listing(html, RECENT)
+        self.assertTrue(parsed['complete'], parsed['warnings'])
+        self.assertEqual(parsed['entryCount'], 3)
+        self.assertEqual(parsed['distinctTotal'], 2)
+        self.assertEqual(parsed['counts']['total'], 2)
+        self.assertEqual(parsed['papers'][0]['version'], 2)
+        self.assertEqual([p['section'] for p in parsed['papers']], ['new','cross'])
+        self.assertEqual([e['section'] for e in parsed['sourceEntries']], ['new','cross','replacement'])
+        self.assertEqual(parsed['papers'][0]['announcementDate'], '2026-11-26')
+
+    def test_recent_population_rollover_missing_rows_and_access_failures_never_become_complete(self):
+        first = recent_listing([('2026-11-26 (showing first 1 of 2 entries)', row())],
+            '<a href="?skip=1&amp;show=2">next</a>')
+        second = recent_listing([
+            ('2026-11-26 (continued, showing last 1 of 2 entries)', row('2611.00002')),
+            ('2026-11-20 (showing 1 of 1 entries)', row('2611.00003'))])
+        results = self.page.evaluate('''async ([first,second,url]) => {
+          const initial=ingest.parseListing(parse(first),url);
+          const load=request=>network.loadCompleteListing(initial,{parseDocument:parse,request});
+          const cases={};
+          for(const status of [401,403,429,503]) {
+            let calls=0;const result=await load(async()=>{calls++;return {status,text:''};});
+            cases['http'+status]={result,calls};
+          }
+          cases.rollover={result:await load(async()=>({status:200,text:second.replaceAll('2026-11-20','2026-11-19')}))};
+          cases.total={result:await load(async()=>({status:200,text:second.replace('Total of 3','Total of 4')}))};
+          cases.network={result:await load(async()=>{throw new Error('Offline');})};
+          cases.todayRedirect={result:await load(async()=>({status:200,text:second,finalUrl:'https://arxiv.org/list/math/new'}))};
+          cases.missing={result:await load(async()=>({status:200,text:second.replace('2611.00002','invalid')}))};
+          return cases;
+        }''', [first,second,RECENT])
+        for name, case in results.items():
+            with self.subTest(case=name):
+                self.assertFalse(case['result']['complete'])
+                self.assertTrue(case['result']['warnings'])
+                if name.startswith('http'):
+                    self.assertEqual(case['calls'],1)
+                    self.assertIn(name[4:], ' '.join(case['result']['warnings']))
+
+    def test_recent_empty_and_invalid_cohort_or_row_positions(self):
+        empty=self.parse_listing('<div id=dlpage><div class=paging>Total of 0 entries</div><dl id=articles></dl></div>',RECENT)
+        self.assertTrue(empty['complete'],empty['warnings'])
+        self.assertEqual(empty['papers'],[])
+        html=recent_listing([
+            ('2026-11-26 (showing 2 of 2 entries)',row()+row('2611.00002')),
+            ('2026-11-20 (showing 1 of 1 entries)',row('2611.00003'))])
+        invalid=[html.replace('#item3','#item2'),
+            html.replace('2026-11-20','2026-11-31'),
+            html.replace('<dt>','<dt><a name="item99">[99]</a>',1),
+            html.replace('showing 2 of 2','showing 1 of 2')]
+        for fixture in invalid:
+            result=self.parse_listing(fixture,RECENT)
+            self.assertFalse(result['complete'])
+            self.assertTrue(result['integrityWarnings'])
 
 
 if __name__ == "__main__":

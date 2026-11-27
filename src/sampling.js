@@ -48,14 +48,15 @@ function optionsFor(papers, options) {
   const requested = options.mode || settings.mode;
   const mode = MODES.has(requested) ? requested : 'random';
   const date = options.date || '';
+  const recent = options.population === 'recent' && options.complete === true;
   const seed = options.seed ?? (date + '|' + mode);
   const byId = new Map();
   const availableSections = new Map(CODES.map(code => [code, new Set()]));
-  if (/^\d{4}-\d{2}-\d{2}$/.test(date)) for (const paper of papers || []) {
-    if (!paper || typeof paper.id !== 'string' || !paper.id || paper.announcementDate !== date) continue;
+  if (recent || /^\d{4}-\d{2}-\d{2}$/.test(date)) for (const paper of papers || []) {
+    if (!paper || typeof paper.id !== 'string' || !paper.id || (!recent && paper.announcementDate !== date)) continue;
     const codes = paperCategories(paper);
     for (const code of codes) availableSections.get(code).add(paper.section);
-    if (!codes.length || !eligibleSection(paper.section, settings)) continue;
+    if (!codes.length || (!(recent && paper.section == null) && !eligibleSection(paper.section, settings))) continue;
     const previous = byId.get(paper.id);
     if (!previous) {
       byId.set(paper.id, paper);
@@ -91,6 +92,7 @@ function optionsFor(papers, options) {
     exploration: Number.isFinite(exploration) ? Math.max(0, Math.min(1, exploration)) : 0.25,
     count: Number.isFinite(count) ? Math.max(1, Math.min(200, Math.trunc(count))) : 50,
     encounters: mode === 'discovery' ? encountered(options, byId) : null,
+    discoveryIntensity: recent ? Math.min(1, Math.max(0, Number(options.discoveryIntensity ?? 1))) : 1,
     incomplete: options.complete === false,
   };
 }
@@ -137,7 +139,7 @@ function novelty(paper, ctx) {
     denominator += importance;
   }
   const score = total / (denominator || 1) - (known.ids.has(paper.id) ? 0.6 : 0);
-  return {weight: Math.exp(4.5 * score), totalTopics: topicLabels.length,
+  return {weight: Math.exp(4.5 * ctx.discoveryIntensity * score), totalTopics: topicLabels.length,
     newTopics: topicLabels.filter(term => !known.topics.has(term)).length,
     totalAuthors: authorLabels.length, newAuthors: authorLabels.filter(id => !known.authors.has(id)).length};
 }
@@ -343,6 +345,13 @@ export function generateSelection(papers, options = {}) {
     default: Object.assign(result, categorySelection(ctx));
   }
   return result;
+}
+
+// Reuse the same matching, weights and identity rules for a verified multi-date
+// Recent population. This does not turn source dates into a synthetic "today".
+export function generateRecentSelection(population, options = {}) {
+  if (population?.population !== 'recent' || population.complete !== true) throw new Error('A complete authoritative Recent population is required.');
+  return generateSelection(population.papers, {...options, population:'recent', date:'', complete:true});
 }
 
 function crossListedReplacement(selection, paperId, target, ctx) {

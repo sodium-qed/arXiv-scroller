@@ -55,7 +55,9 @@ test('all version-one collections, provenance, optional histories, and mathemati
   const backup = completeBackup();
   await store.import(backup);
   const portable = await store.export();
-  assert.deepEqual(portable.state, backup.state);
+  // A legacy bookmark gains an independent snapshot; all supplied records and
+  // provenance must otherwise survive exactly as before the additive migration.
+  assert.deepEqual(portable.state, {...backup.state, savedPapers: {[id]: paper}});
   const fresh = new Store(adapter());
   await fresh.import(portable);
   const loaded = await fresh.load();

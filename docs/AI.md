@@ -79,6 +79,27 @@ python bridge/server.py
 
 Hosted requests use the fixed HTTPS endpoint at `api.openai.com/v1/chat/completions` and set `store: false`. The provider's account and data-handling policies still apply. The API credential belongs exclusively in the bridge process environment. Paste only the separate **pairing token** into the userscript. A provider or model mismatch stops the request before paper retrieval or inference.
 
+## Hosted Gemini setup
+
+The bridge also supports the Gemini API's OpenAI-compatible endpoint. Choose a model available to your Google AI Studio project and check the current [Gemini API pricing](https://ai.google.dev/gemini-api/docs/pricing), [rate limits](https://ai.google.dev/gemini-api/docs/rate-limits) and provider terms. Google may use free-tier prompts and responses to improve its products. Hosted usage is subject to your provider's limits and billing settings.
+
+For example, in PowerShell in the repository folder, generate a separate pairing token and enter the provider key at a masked prompt. Supply positive per-million-token rates for the bridge's conservative cost estimates, even when using a free tier. Keep the terminal open while requesting explanations.
+
+~~~powershell
+$env:ARXIV_AI_PROVIDER = 'gemini'
+$env:ARXIV_AI_MODELS = Read-Host 'Allowed Gemini model name'
+$env:ARXIV_AI_TOKEN = (python -c "import secrets; print(secrets.token_urlsafe(32))")
+Write-Output $env:ARXIV_AI_TOKEN
+$secret = Read-Host 'Gemini API key' -AsSecureString
+$env:GEMINI_API_KEY = [System.Net.NetworkCredential]::new('', $secret).Password
+$env:ARXIV_AI_INPUT_USD_PER_MILLION = Read-Host 'Input USD per million tokens (estimate)'
+$env:ARXIV_AI_OUTPUT_USD_PER_MILLION = Read-Host 'Output USD per million tokens (estimate)'
+$env:ARXIV_AI_DAILY_USD = '1'
+python bridge/server.py
+~~~
+
+In **Settings**, select **Google Gemini API**, enter the same model name, pair using the printed pairing token—not the Gemini API key—and enable AI after reviewing the disclosure. The bridge sends requests to `generativelanguage.googleapis.com`; it does not store the API key in browser settings. The included bridge does not automatically read a `.env` file.
+
 ## What leaves the browser
 
 | Destination | Data |

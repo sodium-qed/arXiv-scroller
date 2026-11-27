@@ -2,11 +2,13 @@
 
 Read the usual arXiv listing with a row of actions beneath each abstract. You can rate a paper, bookmark it, mark it as read or request an AI overview directly from that row. Author follow controls appear just below it. Open **Settings** at the upper right to turn paper tools on or off and choose a recommendation mode.
 
-## Feed expansion — development branch
+[Install the userscript](https://raw.githubusercontent.com/sodium-qed/arXiv-scroller/main/dist/arxiv-discovery.user.js) · [Releases](https://github.com/sodium-qed/arXiv-scroller/releases) · [Feed guide](docs/FEEDS.md) · [AI setup](docs/AI.md)
 
-Version 1.3.0 on `feature/trending` adds **Feeds** beside Settings: Today, Trending, Rising, For You, Discovery, Subscriptions, Highlights, Random, Recent and Saved. Today retains the existing adaptive daily sampler. Other research feeds use the complete official Recent population, including every pagination page. Saved keeps bookmarks from any date. Original arXiv rows retain their order; the feed index and keyboard navigation follow the chosen ranking. [Feed guide](docs/FEEDS.md)
+## Research feeds
 
-[Install the feature/trending build](https://raw.githubusercontent.com/sodium-qed/arXiv-scroller/feature/trending/dist/arxiv-discovery.user.js). This is a branch build, not a published release. Updating the existing userscript retains its storage identity and private data. Tampermonkey may request permission for `arxiv.org` so the selected feed can retrieve missing listing pages; the optional AI bridge remains on numeric loopback. The ordinary installation link below still follows the stable `main` branch.
+Open **Feeds** beside Settings to choose Today, Trending, Rising, For You, Discovery, Subscriptions, Highlights, Random, Recent or Saved. Today retains the adaptive daily sampler. Other research feeds use the complete official Recent population, including every pagination page. Saved keeps bookmarks from any date. Original arXiv rows retain their order; the feed index and keyboard navigation follow the chosen ranking. [Feed guide](docs/FEEDS.md)
+
+Updating the existing userscript retains its storage identity and private data. Tampermonkey may request permission for `arxiv.org` so the selected feed can retrieve missing listing pages; the optional AI bridge remains on numeric loopback.
 
 **Readership investigation:** the live full-population OpenAIRE experiment matched 6 of 2,555 Recent papers and 179 of 701 Today papers on 26 November 2026. It returned no `views` or `downloads` values for either population. Missing measurements were not converted to zero. Consequently, no provider is automatically selected and Trending reports insufficient data until imported observations pass its quality gates. Rising requires a documented cumulative counter and comparable history; none of the investigated counters qualifies. [Results and reproduction](docs/research/experiment-running.md) · [Provider comparison](docs/research/provider-comparison.md)
 
@@ -52,7 +54,7 @@ Navigation uses **Alt+J** and **Alt+K**. On the current paper use **Alt+L** to l
 
 ## Optional AI
 
-Daily selection, feedback, bookmarks, subscriptions and the knowledge editor work with AI disabled. To enable an overview or contextual dictionary, run the included bridge, pair it with the userscript and explicitly authorize a model in Settings. You can run a local OpenAI-compatible model or configure the hosted OpenAI API. Hosted use requires API billing and can incur charges. The bridge keeps the provider credential outside the browser.
+Daily selection, feedback, bookmarks, subscriptions and the knowledge editor work with AI disabled. To enable an overview or contextual dictionary, run the included bridge, pair it with the userscript and explicitly authorize a model in Settings. You can run a local OpenAI-compatible model or configure a hosted OpenAI or Gemini API. Hosted availability, free-tier limits and charges depend on the provider and account. The bridge keeps the provider credential outside the browser.
 
 Choose **AI overview** inside the paper's tools, or highlight a term in a supported title, abstract, HTML paper or previous answer and choose **Explain selection**. The answer appears with that paper, identifies its source as HTML, PDF or abstract, and links to available evidence. **No Spoilers** is on initially. You can change it globally or for an individual paper. [Bridge setup, disclosure and cost controls](docs/AI.md) · [Windows PowerShell setup](docs/AI.md#windows-powershell)
 
@@ -84,3 +86,5 @@ The build writes `dist/arxiv-discovery.user.js`. The regression input is a lossl
 - [Reproducible Trending and Rising methodology](docs/research/trending-methodology.md)
 
 Independent project. Thank you to arXiv for use of its open access interoperability.
+
+Project code is available under the [MIT License](LICENSE). Bundled third-party components retain their own license notices in `vendor/`.

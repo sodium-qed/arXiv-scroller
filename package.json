@@ -1,6 +1,7 @@
 {
   "name": "arxiv-discovery-userscript",
   "version": "1.3.1",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "description": "An additive, local-first Tampermonkey research discovery companion for arXiv.",

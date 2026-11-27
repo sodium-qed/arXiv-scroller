@@ -1,8 +1,13 @@
 # Changelog
 
-## 1.3.0 — feature/trending development build
+## 1.3.1
 
-Implementation began at `a36bce46eec08cc3f00d19b47048de85ebcd4984` (adaptive category sampling) and was rebased onto `65802c20f991c8ded25f1567c4fc80fad951d0a2` (version 1.2.5, retaining Gemini support and the latest math-rendering fixes). Development is isolated on `feature/trending`; this entry does not publish a release or merge the branch.
+- Reduce work on long listings by sharing the paper controls' stylesheet and creating the contents of **More tools** only when opened.
+- Retain the Gemini bridge, mathematical rendering, feeds and saved data from earlier versions.
+
+## 1.3.0
+
+The research feeds were merged into `main`, building on adaptive category sampling and version 1.2.5's Gemini and math-rendering support.
 
 - Add all ten feed choices within the existing additive arXiv interface, reusing native rows, paper actions, the interest model, subscriptions and bookmarks.
 - Add complete multi-date Recent ingestion, validated source positions and cohort boundaries, normalized deduplication and restart-safe public population caching.
